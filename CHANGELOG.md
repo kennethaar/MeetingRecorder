@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 - 2026-11-12
+
+- Audio backend: Setup now finishes on PCs with .NET Framework 4.8, instead
+  of asking you to install it again or staying at Installing (#4).
+
 ## 0.1.1 - 2026-11-12
 
 - Record a meeting: The app now starts, and Start records instead of failing

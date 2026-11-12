@@ -4,7 +4,7 @@ $runtime=Join-Path $env:LOCALAPPDATA 'MeetingRecorder'
 $deps=Join-Path $runtime 'backend-2.2.1'
 New-Item -ItemType Directory -Force $deps | Out-Null
 function Set-State($state,$detail) {
- if($Status){$tmp=$Status+'.tmp';[IO.File]::WriteAllText($tmp,"[Capture]`r`nState=$state`r`nDetail=$($detail -replace '[\r\n]',' ')`r`n",[Text.Encoding]::Unicode);if(Test-Path $Status){[IO.File]::Replace($tmp,$Status,$null)}else{[IO.File]::Move($tmp,$Status)}}
+ if($Status){$tmp=$Status+'.tmp';[IO.File]::WriteAllText($tmp,"[Capture]`r`nState=$state`r`nDetail=$($detail -replace '[\r\n]',' ')`r`n",[Text.Encoding]::Unicode);if(Test-Path $Status){[IO.File]::Replace($tmp,$Status,[NullString]::Value)}else{[IO.File]::Move($tmp,$Status)}}
 }
 try {
  if($Mode -eq 'Recover') {
@@ -49,8 +49,10 @@ try {
  }
  $core=Join-Path $deps 'NAudio.core.dll';$wasapi=Join-Path $deps 'NAudio.wasapi.dll'
  [Reflection.Assembly]::LoadFrom($core)|Out-Null;[Reflection.Assembly]::LoadFrom($wasapi)|Out-Null
- $facade=Join-Path ([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) 'Facades/netstandard.dll'
- if(!(Test-Path $facade)){throw 'Install or repair .NET Framework 4.8, then retry.'}
+ # .NET 4.7.1+ installs netstandard.dll in the runtime directory itself; older layouts used Facades (#4).
+ $netRuntime=[Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+ $facade=@((Join-Path $netRuntime 'netstandard.dll'),(Join-Path $netRuntime 'Facades\netstandard.dll')) | Where-Object {Test-Path $_} | Select-Object -First 1
+ if(!$facade){throw 'Install or repair .NET Framework 4.8, then retry.'}
  Add-Type -Path (Join-Path $PSScriptRoot 'Capture.cs') -ReferencedAssemblies @($core,$wasapi,$facade,'System.dll','System.Core.dll')
  if($Mode -eq 'Setup'){Set-State 'Ready' 'Backend ready';exit 0}
  [CaptureEngine]::Run($Output,$Status,$Stop,$ParentId)

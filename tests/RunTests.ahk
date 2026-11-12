@@ -17,6 +17,7 @@ Tests := [
     ["Help legend selectors name real controls", TestLegendSelectors],
     ["In-app changelog copy is current", TestWhatsNewCurrent],
     ["Recovery repairs partial recordings", TestRecovery],
+    ["Audio backend setup reaches Ready on .NET 4.8 (#4)", TestBackendSetup],
 ]
 Failures := 0, Ran := 0
 for t in Tests {
@@ -156,6 +157,29 @@ TestRecovery() {
     } finally {
         EnvSet("LOCALAPPDATA", oldAppData)
         try DirDelete(tmp, true)
+    }
+}
+
+; Bug #4: setup looked for netstandard.dll in a Facades folder that .NET 4.7.1+ does not have,
+; so the panel said "Install or repair .NET Framework 4.8" on PCs that had it.
+; Also #4: once status.ini existed (after "Downloading..."), every later status write failed,
+; so a first setup stayed at Installing. The status file starts out existing to cover that.
+; Uses a temp LOCALAPPDATA that is kept between runs, so NAudio is downloaded only once.
+TestBackendSetup() {
+    appData := A_Temp "\MeetingRecorder-tests\appdata"
+    status := A_Temp "\MeetingRecorder-tests\status-" A_TickCount ".ini"
+    DirCreate(appData)
+    FileAppend("[Capture]`r`nState=Installing`r`nDetail=Downloading`r`n", status, "UTF-16")
+    oldAppData := EnvGet("LOCALAPPDATA")
+    try {
+        EnvSet("LOCALAPPDATA", appData)
+        RunWait(PowerShell() " -File " Q(Root "\Backend.ps1") " -Mode Setup -Status " Q(status), , "Hide")
+        state := IniRead(status, "Capture", "State", "(no status)")
+        detail := IniRead(status, "Capture", "Detail", "")
+        Check(state = "Ready", "Panel would show " state ": " detail)
+    } finally {
+        EnvSet("LOCALAPPDATA", oldAppData)
+        try FileDelete(status)
     }
 }
 
