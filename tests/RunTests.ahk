@@ -1,8 +1,8 @@
 #Requires AutoHotkey v2.0
 #NoTrayIcon
 #SingleInstance Off
-; Run-Tests.ps1 copies HelpTopics() out of MeetingRecorder.ahk to this temp file first.
-#Include %A_Temp%\MeetingRecorder-tests\HelpTopics.ahk
+; Run-Tests.ps1 copies the app functions the tests call out of MeetingRecorder.ahk to this temp file.
+#Include %A_Temp%\MeetingRecorder-tests\AppFunctions.ahk
 #Include %A_ScriptDir%\..\WhatsNew.generated.ahk
 
 ; Usage: pwsh -NoProfile -File tests\Run-Tests.ps1 [-Filter "part of a test name"]
@@ -18,6 +18,9 @@ Tests := [
     ["In-app changelog copy is current", TestWhatsNewCurrent],
     ["Recovery repairs partial recordings", TestRecovery],
     ["Audio backend setup reaches Ready on .NET 4.8 (#4)", TestBackendSetup],
+    ["Teams call is found from microphone use (#5)", TestTeamsDetection],
+    ["Recording is named after the meeting running now (#5)", TestMeetingName],
+    ["Outlook dates are read in any locale (#5)", TestComDate],
 ]
 Failures := 0, Ran := 0
 for t in Tests {
@@ -181,6 +184,73 @@ TestBackendSetup() {
         EnvSet("LOCALAPPDATA", oldAppData)
         try FileDelete(status)
     }
+}
+
+; Windows notes microphone use per app; LastUsedTimeStop = 0 means the app is using it now.
+; Uses a temp registry key instead of the real ConsentStore.
+TestTeamsDetection() {
+    base := "HKCU\Software\MeetingRecorder-tests\microphone"
+    newTeams := base "\MSTeams_8wekyb3d8bbwe"
+    try {
+        Check(!TeamsCallActive(base), "No Teams key, but a call was reported")
+        SetMic(newTeams, 134389553262391587, 134389563469946077)
+        Check(!TeamsCallActive(base), "New Teams finished its call, but a call was reported")
+        SetMic(newTeams, 134389553262391587, 0)
+        Check(TeamsCallActive(base), "New Teams is using the microphone, but no call was found")
+        SetMic(newTeams, 1, 2)
+        SetMic(base "\NonPackaged\C:#Program Files#Zoom#bin#Zoom.exe", 1, 0)
+        Check(!TeamsCallActive(base), "Another app using the microphone counted as a Teams call")
+        SetMic(base "\NonPackaged\C:#Users#x#AppData#Local#Microsoft#Teams#current#Teams.exe", 1, 0)
+        Check(TeamsCallActive(base), "Classic Teams is using the microphone, but no call was found")
+    } finally {
+        RunWait(A_ComSpec ' /c reg delete "HKCU\Software\MeetingRecorder-tests" /f', , "Hide")
+    }
+}
+
+SetMic(key, start, stop) {
+    for name, value in Map("LastUsedTimeStart", start, "LastUsedTimeStop", stop)
+        RunWait(A_ComSpec ' /c reg add "' key '" /v ' name ' /t REG_QWORD /d ' value ' /f', , "Hide")
+}
+
+; The meeting that names the file: running now or starting within 10 minutes, not all-day,
+; the one whose start is closest to now. No meeting or a bad title gives "Recording".
+TestMeetingName() {
+    now := "20261112100000"
+    M(subject, start, end, allDay := false) => {subject: subject, start: "20261112" start "00", end: "20261112" end "00", allDay: allDay}
+    cases := [
+        [[], ""],
+        [[M("Ended", "0900", "1000")], ""],
+        [[M("Holiday", "0000", "2359", true)], ""],
+        [[M("Later", "1015", "1100")], ""],
+        [[M("Soon", "1008", "1030")], "Soon"],
+        [[M("Long", "0930", "1130"), M("Weekly sync", "1005", "1030"), M("Ended", "0800", "0900")], "Weekly sync"],
+    ]
+    for c in cases {
+        got := PickMeeting(c[1], now)
+        Check(got = c[2], "Case " A_Index ": picked '" got "', expected '" c[2] "'")
+    }
+    stamp := "2026-11-12 100212", id := "1a2b3c4d"
+    names := [
+        ["Weekly sync", "2026-11-12 100212 - Weekly sync - 1a2b3c4d.partial.wav"],
+        ["", "2026-11-12 100212 - Recording - 1a2b3c4d.partial.wav"],
+        ['Q4: "Plan" / review?', "2026-11-12 100212 - Q4 Plan review - 1a2b3c4d.partial.wav"],
+        [" ... ", "2026-11-12 100212 - Recording - 1a2b3c4d.partial.wav"],
+        [StrReplace(Format("{:70}", ""), " ", "a"), "2026-11-12 100212 - " StrReplace(Format("{:60}", ""), " ", "a") " - 1a2b3c4d.partial.wav"],
+    ]
+    for n in names {
+        got := RecordingName("C:\Rec", n[1], stamp, id)
+        Check(got = "C:\Rec\" n[2], "Title '" n[1] "' gave " got)
+    }
+}
+
+; Outlook dates reach AHK as text in the user's date format. Make that text the same way COM does.
+TestComDate() {
+    for oaDate, stamp in Map(46338.4375, "20261112103000", 46338.0, "20261112000000", 46024.9999884259, "20260102235959") {
+        DllCall("oleaut32\VarBstrFromDate", "Double", oaDate, "UInt", 0x400, "UInt", 0, "Ptr*", &bstr := 0)
+        text := StrGet(bstr), DllCall("oleaut32\SysFreeString", "Ptr", bstr)
+        Check(ComDateToStamp(text) = stamp, "'" text "' gave '" ComDateToStamp(text) "', expected " stamp)
+    }
+    Check(ComDateToStamp("not a date") = "", "Text that is not a date must give an empty result")
 }
 
 ; ---------------------------------------------------------------- helpers

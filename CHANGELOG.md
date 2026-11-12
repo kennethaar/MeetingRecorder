@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 - 2026-11-12
+
+- Teams calls: When a Teams call starts, the panel offers to record it. Click
+  Record or Not now; it never records by itself (#5).
+- Teams calls: While classic Outlook is open, recordings are named after the
+  meeting that is on now (#5).
+
 ## 0.1.2 - 2026-11-12
 
 - Audio backend: Setup now finishes on PCs with .NET Framework 4.8, instead

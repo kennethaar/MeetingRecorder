@@ -320,13 +320,19 @@ accessibility and management by exception:
 - Default shortcut `^!r` (Ctrl+Alt+R) toggles recording. Configurable.
 - Settings: `%LOCALAPPDATA%\MeetingRecorder\settings.ini`.
   `[Settings]` `Folder`, `Shortcut`, `Latest` (last saved file),
-  `CloudNotice` (1 after the Word upload notice); `[UI]` `X`, `Y` (panel).
+  `CloudNotice` (1 after the Word upload notice), `Detect` (offer to record
+  Teams calls, default 1), `Calendar` (name files after the classic Outlook
+  meeting, default 1); `[UI]` `X`, `Y` (panel).
   Missing keys fall back to defaults; add new keys the same way.
 - IPC, also in `%LOCALAPPDATA%\MeetingRecorder`: `status.ini`
   (`[Capture]` `State`, `Detail`; replaced atomically, UTF-16) and
   `stop.signal` (its presence asks the helper to stop).
 - Dependencies: `%LOCALAPPDATA%\MeetingRecorder\backend-2.2.1`.
-- Recordings: `<Folder>\yyyy-MM-dd HHmmss - Recording - <8 hex>.partial.wav`
+- Teams calls: `DetectCall()` runs every 2 s. A call is active when Windows'
+  microphone ConsentStore shows Teams with `LastUsedTimeStop = 0`. It only
+  offers to record. Meeting names come from classic Outlook via
+  `ComObjActive` (never started by the app; new Outlook has no COM).
+- Recordings: `<Folder>\yyyy-MM-dd HHmmss - <meeting or Recording> - <8 hex>.partial.wav`
   while recording, then renamed to `.wav`, ` - Incomplete.wav`, or (startup
   recovery) ` - Recovered incomplete.wav`. Format: 44-byte PCM header,
   48 kHz, 16-bit, stereo (left = output, right = microphone), max 5 hours.

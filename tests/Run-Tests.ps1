@@ -4,14 +4,18 @@ param([string]$Filter = '', [switch]$FailuresOnly)
 $ErrorActionPreference = 'Stop'
 $ahk = Join-Path $env:ProgramFiles 'AutoHotkey\v2\AutoHotkey64.exe'
 if (!(Test-Path $ahk)) { throw "AutoHotkey v2 not found at $ahk" }
-# HelpTopics() lives in MeetingRecorder.ahk, which cannot be included without starting the app.
-# Copy just that function to a temp file; RunTests.ahk includes it from there.
-$helpDir = Join-Path ([IO.Path]::GetTempPath()) 'MeetingRecorder-tests'
-New-Item -ItemType Directory -Force $helpDir | Out-Null
+# MeetingRecorder.ahk cannot be included without starting the app. Copy the functions the tests
+# call to a temp file; RunTests.ahk includes it from there. A function must start at column 0
+# with "Name(...) {" and end with the first "}" at column 0.
+$testDir = Join-Path ([IO.Path]::GetTempPath()) 'MeetingRecorder-tests'
+New-Item -ItemType Directory -Force $testDir | Out-Null
 $app = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\MeetingRecorder.ahk'))
-$m = [regex]::Match($app, '(?ms)^HelpTopics\(\) \{.*?^\}')
-$help = if ($m.Success) { $m.Value } else { "HelpTopics() {`n    throw Error(`"No HelpTopics() function in MeetingRecorder.ahk`")`n}" }
-[IO.File]::WriteAllText((Join-Path $helpDir 'HelpTopics.ahk'), $help, [Text.UTF8Encoding]::new($true))
+$functions = 'HelpTopics', 'TeamsCallActive', 'RegQword', 'PickMeeting', 'ComDateToStamp', 'RecordingName'
+$code = foreach ($name in $functions) {
+    $m = [regex]::Match($app, "(?ms)^$name\([^)\r\n]*\) \{.*?^\}")
+    if ($m.Success) { $m.Value } else { "$name(*) {`n    throw Error(`"No $name() function in MeetingRecorder.ahk`")`n}" }
+}
+[IO.File]::WriteAllText((Join-Path $testDir 'AppFunctions.ahk'), ($code -join "`n`n"), [Text.UTF8Encoding]::new($true))
 $out = [IO.Path]::GetTempFileName()
 $err = [IO.Path]::GetTempFileName()
 try {
