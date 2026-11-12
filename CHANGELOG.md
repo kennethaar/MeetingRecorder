@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 - 2026-11-12
+
+- Record a meeting: The app now starts, and Start records instead of failing
+  with an error (#2).
+
 ## 0.1.0 - 2026-11-12
 
 - Record a meeting: Record a call to a stereo WAV file, with what you hear on

@@ -1,7 +1,7 @@
 ﻿#Requires AutoHotkey v2.0
 #SingleInstance Ignore
 Persistent
-AppVersion := "0.1.0"
+AppVersion := "0.1.1"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -82,7 +82,7 @@ Toggle(*) {
   return
  try {
   DirCreate(Folder)
-  if DriveSpaceFree(Folder) < 512
+  if DriveGetSpaceFree(Folder) < 512
    throw Error("Less than 512 MB free. Choose another folder.")
   probe := Folder "\.write-test-" A_TickCount
   FileAppend("test",probe), FileDelete(probe)
@@ -232,7 +232,9 @@ Settings(*) {
    IniWrite(Folder,Config,"Settings","Folder")
    IniWrite(Shortcut,Config,"Settings","Shortcut")
    g.Destroy()
-  } catch as e MsgBox(e.Message,"Settings not saved")
+  } catch as e {
+   MsgBox(e.Message,"Settings not saved")
+  }
  }
 }
 BrowseFolder(ctrl) {

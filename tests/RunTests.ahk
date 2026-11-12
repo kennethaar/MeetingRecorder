@@ -8,6 +8,7 @@
 Root := RegExReplace(A_ScriptDir, "\\[^\\]+$")
 Filter := A_Args.Length ? A_Args[1] : ""
 Tests := [
+    ["App script loads without errors or warnings (#2)", TestAppLoads],
     ["Version matches newest changelog entry", TestVersion],
     ["Changelog format", TestChangelogFormat],
     ["Changelog items name a help topic", TestChangelogTopics],
@@ -33,6 +34,21 @@ Out(Format("`n{} run, {} failed", Ran, Failures))
 ExitApp(Failures ? 1 : 0)
 
 ; ---------------------------------------------------------------- tests
+
+; Bug #2: a syntax error kept the app from starting, and an unknown function
+; (DriveSpaceFree) made every recording fail. /validate loads without running;
+; a temp copy gets #Warn ... StdOut so warnings print instead of opening a dialog.
+TestAppLoads() {
+    base := A_Temp "\MeetingRecorder-validate-" A_TickCount
+    try {
+        FileAppend("#Warn VarUnset, StdOut`n" FileRead(Root "\MeetingRecorder.ahk", "UTF-8"), base ".ahk", "UTF-8")
+        code := RunWait(A_ComSpec ' /c "' Q(A_AhkPath) " /ErrorStdOut /validate " Q(base ".ahk") " > " Q(base ".txt") ' 2>&1"', Root, "Hide")
+        text := Trim(FileRead(base ".txt"), " `r`n")
+        Check(code = 0 && text = "", "Exit " code ": " text)
+    } finally {
+        try FileDelete(base ".*")
+    }
+}
 
 TestVersion() {
     src := FileRead(Root "\MeetingRecorder.ahk", "UTF-8")
