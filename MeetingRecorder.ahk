@@ -1,7 +1,7 @@
 ﻿#Requires AutoHotkey v2.0
 #SingleInstance Ignore
 Persistent
-AppVersion := "0.2.0"
+AppVersion := "0.2.1"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -194,11 +194,15 @@ SavedNotice(kind,detail) {
  Completion.AddButton("vDismiss x+8 w80","Dismiss").OnEvent("Click",(*) => Completion.Hide())
  Completion.Show("NoActivate")
 }
+; The Recording saved window is always on top; messages opened from it must be too (#6).
+NoticeBox(text,title,options:="") {
+ return MsgBox(text,title,options " 0x40000")
+}
 ShowLatest(*) {
  global Latest
  if Latest != "" && FileExist(Latest)
   Run("explorer.exe /select," Q(Latest))
- else MsgBox("No saved recording is available yet.","Meeting Recorder")
+ else NoticeBox("No saved recording is available yet.","Meeting Recorder")
 }
 OpenFolder(*) {
  global Folder
@@ -207,17 +211,17 @@ OpenFolder(*) {
 WordHandoff(*) {
  global Config
  if IniRead(Config,"Settings","CloudNotice",0) != 1 {
-  if MsgBox("Word Transcribe uploads audio to OneDrive. This app does not upload anything.`n`nContinue to Word?","Word handoff","YesNo") != "Yes"
+  if NoticeBox("Word Transcribe uploads audio to OneDrive. This app does not upload anything.`n`nContinue to Word?","Word handoff","YesNo") != "Yes"
    return
   IniWrite(1,Config,"Settings","CloudNotice")
  }
  ShowLatest()
  try Run("winword.exe")
  catch {
-  MsgBox("Word could not open. Your recording is still saved and selected in Explorer.","Word unavailable")
+  NoticeBox("Word could not open. Your recording is still saved and selected in Explorer.","Word unavailable")
   return
  }
- MsgBox("In Word: Home > Dictate > Transcribe > Upload audio.`nSelect the WAV file shown in Explorer. Access to Transcribe depends on your account.","Upload your recording")
+ NoticeBox("In Word: Home > Dictate > Transcribe > Upload audio.`nSelect the WAV file shown in Explorer. Access to Transcribe depends on your account.","Upload your recording")
 }
 Settings(*) {
  global Folder, Config, Shortcut, DetectOn, CalendarOn

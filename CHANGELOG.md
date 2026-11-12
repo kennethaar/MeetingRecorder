@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 - 2026-11-13
+
+- Open in Word: The question about uploading to OneDrive now shows on top of
+  the Recording saved window, instead of hidden behind it (#6).
+
 ## 0.2.0 - 2026-11-12
 
 - Teams calls: When a Teams call starts, the panel offers to record it. Click

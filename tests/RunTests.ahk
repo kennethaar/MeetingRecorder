@@ -21,6 +21,7 @@ Tests := [
     ["Teams call is found from microphone use (#5)", TestTeamsDetection],
     ["Recording is named after the meeting running now (#5)", TestMeetingName],
     ["Outlook dates are read in any locale (#5)", TestComDate],
+    ["Questions from the Recording saved window show on top of it (#6)", TestNoticeBoxOnTop],
 ]
 Failures := 0, Ran := 0
 for t in Tests {
@@ -251,6 +252,35 @@ TestComDate() {
         Check(ComDateToStamp(text) = stamp, "'" text "' gave '" ComDateToStamp(text) "', expected " stamp)
     }
     Check(ComDateToStamp("not a date") = "", "Text that is not a date must give an empty result")
+}
+
+; Bug #6: the Recording saved window is always on top, so the Word handoff question opened
+; behind it. Show a window like it, open a question, and check which one is in front.
+; The T5 timeout closes the question even if the check cannot.
+TestNoticeBoxOnTop() {
+    title := "MeetingRecorder test question " A_TickCount
+    notice := Gui("+AlwaysOnTop +ToolWindow +E0x08000000", "Recording saved")
+    notice.AddText("w480 h300", "Recording saved")
+    notice.Show("NoActivate")
+    seen := {result: "No question appeared"}
+    SetTimer(Inspect, -100)
+    try NoticeBox("Continue to Word?", title, "YesNo T5")
+    finally notice.Destroy()
+    Check(seen.result = "", seen.result)
+
+    Inspect() {
+        if !box := WinWait(title " ahk_class #32770", , 3)
+            return
+        order := WinGetList()
+        boxAt := noticeAt := 0
+        for hwnd in order
+            if hwnd = box
+                boxAt := A_Index
+            else if hwnd = notice.Hwnd
+                noticeAt := A_Index
+        seen.result := boxAt && noticeAt && boxAt < noticeAt ? "" : "The question opened behind the Recording saved window"
+        ControlClick("Button2", box)
+    }
 }
 
 ; ---------------------------------------------------------------- helpers
