@@ -1,0 +1,6 @@
+settings.ini
+*.wav
+*.signal
+status.ini*
+backend-*/
+*.zip
