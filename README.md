@@ -55,10 +55,9 @@ A normal stop drains buffered audio. If capture fails, the saved incomplete file
 - Verify the panel does not steal typing focus and cannot be closed while recording.
 
 ## Architecture
-MeetingRecorder.ahk: orchestration, UI, settings and handoff. Holds `AppVersion`.
+MeetingRecorder.ahk: orchestration, UI, settings, handoff and in-app help topics. Holds `AppVersion`.
 Backend.ps1: pinned dependency bootstrap, C# compilation, startup recovery.
 Capture.cs: WASAPI capture, mono conversion, resampling, stereo writing and status IPC.
-Help.ahk: in-app help topics.
 WhatsNew.generated.ahk: in-app copy of the changelog, made by `tools\Build-WhatsNew.ps1`.
 
 ## Development

@@ -4,6 +4,14 @@ param([string]$Filter = '', [switch]$FailuresOnly)
 $ErrorActionPreference = 'Stop'
 $ahk = Join-Path $env:ProgramFiles 'AutoHotkey\v2\AutoHotkey64.exe'
 if (!(Test-Path $ahk)) { throw "AutoHotkey v2 not found at $ahk" }
+# HelpTopics() lives in MeetingRecorder.ahk, which cannot be included without starting the app.
+# Copy just that function to a temp file; RunTests.ahk includes it from there.
+$helpDir = Join-Path ([IO.Path]::GetTempPath()) 'MeetingRecorder-tests'
+New-Item -ItemType Directory -Force $helpDir | Out-Null
+$app = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\MeetingRecorder.ahk'))
+$m = [regex]::Match($app, '(?ms)^HelpTopics\(\) \{.*?^\}')
+$help = if ($m.Success) { $m.Value } else { "HelpTopics() {`n    throw Error(`"No HelpTopics() function in MeetingRecorder.ahk`")`n}" }
+[IO.File]::WriteAllText((Join-Path $helpDir 'HelpTopics.ahk'), $help, [Text.UTF8Encoding]::new($true))
 $out = [IO.Path]::GetTempFileName()
 $err = [IO.Path]::GetTempFileName()
 try {

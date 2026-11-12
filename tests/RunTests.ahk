@@ -1,10 +1,11 @@
 #Requires AutoHotkey v2.0
 #NoTrayIcon
 #SingleInstance Off
-#Include %A_ScriptDir%\..\Help.ahk
+; Run-Tests.ps1 copies HelpTopics() out of MeetingRecorder.ahk to this temp file first.
+#Include %A_Temp%\MeetingRecorder-tests\HelpTopics.ahk
 #Include %A_ScriptDir%\..\WhatsNew.generated.ahk
 
-; Usage: AutoHotkey64.exe /ErrorStdOut tests\RunTests.ahk [part of a test name]
+; Usage: pwsh -NoProfile -File tests\Run-Tests.ps1 [-Filter "part of a test name"]
 Root := RegExReplace(A_ScriptDir, "\\[^\\]+$")
 Filter := A_Args.Length ? A_Args[1] : ""
 Tests := [

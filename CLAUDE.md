@@ -7,9 +7,9 @@ there is no build artifact.
 
 ## Source and navigation
 
-- Source lives in the repository root: `MeetingRecorder.ahk` (app),
-  `Backend.ps1` (dependency bootstrap, compile, recovery), `Capture.cs`
-  (capture engine), `Help.ahk` (help topics). Tools live in `tools/`.
+- Source lives in the repository root: `MeetingRecorder.ahk` (app and help
+  topics), `Backend.ps1` (dependency bootstrap, compile, recovery),
+  `Capture.cs` (capture engine). Tools live in `tools/`.
   Generated files: `WhatsNew.generated.ahk`. Never edit generated files directly.
 - Build with: nothing to build. `Backend.ps1` compiles `Capture.cs` in memory
   at each launch. The test suite checks that the AHK script loads.
@@ -34,8 +34,9 @@ Known entry points:
   control v-names (`vStatus`, `vAction`, ...) are the help legend selectors.
 - `CaptureEngine.Run` in `Capture.cs`: capture, mixing, WAV writing. The WAV
   header layout must stay in step with `Backend.ps1 -Mode Recover`.
-- `HelpTopics()` in `Help.ahk`: help topic data. Changelog items name these
-  titles.
+- `HelpTopics()` at the end of `MeetingRecorder.ahk`: help topic data.
+  Changelog items name these titles. `tests\Run-Tests.ps1` copies this
+  function to a temp file for the tests, so run the tests through it.
 
 Write source files with Write or Edit, not with shell heredocs or ad hoc
 rewrite scripts. Heredocs eat backslashes in source code.
@@ -181,7 +182,7 @@ failing test alone instead.
 
 ## Help
 
-Help lives in the app as topics in `Help.ahk` (`HelpTopics()`; the More fold
+Help lives in the app as topics in `MeetingRecorder.ahk` (`HelpTopics()`; the More fold
 is the `more` field). There are no
 screenshots: help explains the live screen itself.
 
