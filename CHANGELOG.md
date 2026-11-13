@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0 - 2026-11-13
+
+- Transcribe a recording: Names from the Outlook meeting are spelled right in
+  the transcript. The app keeps the meeting title and the people invited when
+  recording starts, and gives them to the transcriber as a hint (#10).
+- Transcribe a recording: A long turn is split into paragraphs. A pause of
+  2 seconds starts a new one with its own time, so the text is easier to
+  scan (#10).
+- Transcribe a recording: Transcribing uses half of the PC's processor, so
+  the PC stays quick while it runs. It is just as fast as before (#10).
+
 ## 0.4.1 - 2026-11-13
 
 - Tray menu: Click the red dot to open the panel. Right-click still opens the

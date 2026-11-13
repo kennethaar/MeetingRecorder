@@ -23,6 +23,7 @@ Tests := [
     ["Outlook dates are read in any locale (#5)", TestComDate],
     ["Questions from the Recording saved window show on top of it (#6)", TestNoticeBoxOnTop],
     ["Transcript says who spoke when, as text and subtitles (#7)", TestTranscriptText],
+    ["Meeting title and attendees become the transcript hint (#10)", TestMeetingHint],
     ["WhisperX is found in this app's or PodcastClipper's install (#7)", TestFindTranscriber],
     ["A recording is transcribed on this PC into Others and Me (#7)", TestTranscribeSpeech],
     ["Recording saved window says what is new and offers to transcribe again (#8)", TestNoticeView],
@@ -239,6 +240,13 @@ TestMeetingName() {
         got := PickMeeting(c[1], now)
         Check(got = c[2], "Case " A_Index ": picked '" got "', expected '" c[2] "'")
     }
+    ; #10: the attendees of the picked meeting come along, for the transcript hint.
+    sync := M("Weekly sync", "1005", "1030"), sync.people := "Nordmann, Kari`; Ola Hansen"
+    other := M("Long", "0930", "1130"), other.people := "Someone Else"
+    PickMeeting([other, sync], now, &people)
+    Check(people = "Nordmann, Kari`; Ola Hansen","Attendees of the picked meeting were '" people "'")
+    PickMeeting([], now, &people)
+    Check(people = "", "No meeting must give no attendees, got '" people "'")
     stamp := "2026-11-12 100212", id := "1a2b3c4d"
     names := [
         ["Weekly sync", "2026-11-12 100212 - Weekly sync - 1a2b3c4d.partial.wav"],
@@ -314,7 +322,47 @@ TestTranscriptText() {
         . "4`r`n01:02:05,040 --> 01:02:07,500`r`nOthers: Thanks, bye.`r`n"
     Check(SubtitleText(segs) = srt, "Subtitles were:`n" SubtitleText(segs))
     Check(TranscriptText([]) = "No speech was found in this recording.`r`n", "Silent recording gave: " TranscriptText([]))
+    ; #10: a pause of 2 s or more in one person's turn starts a paragraph with its own time.
+    pauses := [
+        S(10.0, 12.0, "Me", "First."),
+        S(13.9, 15.0, "Me", "Same paragraph."),
+        S(17.0, 18.0, "Me", "After a pause."),
+        S(19.0, 20.0, "Others", "Reply."),
+    ]
+    text := "[00:00:10] Me: First. Same paragraph.`r`n`r`n"
+        . "[00:00:17] After a pause.`r`n`r`n"
+        . "[00:00:19] Others: Reply.`r`n"
+    Check(TranscriptText(pauses) = text, "Transcript with pauses was:`n" TranscriptText(pauses))
     Check(TranscriptPath("C:\Rec\a - Incomplete.wav", "txt") = "C:\Rec\a - Incomplete.txt", "Transcript must sit next to the WAV with the same name")
+}
+
+; #10: the meeting title and attendees kept when recording starts become the hint for the
+; speech model, so names come out spelled right. "Last, First" reads as "First Last"; e-mail
+; addresses are left out. Older recordings use the title in the file name; "Recording" gives none.
+TestMeetingHint() {
+    tmp := A_Temp "\MeetingRecorder-test-" A_TickCount
+    ini := tmp "\meetings.ini"
+    try {
+        DirCreate(tmp)
+        old := "C:\Rec\2026-11-12 100212 - Q4 budget - 0a0b0c0d - Incomplete.wav"
+        Check(MeetingHint(ini, old) = "Q4 budget.", "No stored details gave '" MeetingHint(ini, old) "'")
+        Check(MeetingHint(ini, "C:\Rec\2026-11-12 100212 - Recording - 0a0b0c0d.wav") = "", "A recording without a meeting must give no hint")
+        SaveMeetingHint(ini, "1a2b3c4d", 'Weekly "sync"', "Nordmann, Kari`; Øyvind Ås`; kari@example.com`; `; Ola Hansen")
+        wav := "C:\Rec\2026-11-12 100212 - Weekly sync - 1a2b3c4d.wav"
+        hint := MeetingHint(ini, wav)
+        Check(hint = 'Weekly "sync". Kari Nordmann, Øyvind Ås, Ola Hansen.', "Stored details gave '" hint "'")
+        Check(MeetingHint(ini, old) = "Q4 budget.", "Another recording's details were used")
+        many := ""
+        loop 80
+            many .= "Person Number" A_Index "`; "
+        SaveMeetingHint(ini, "2a2b3c4d", "Town hall", many)
+        long := MeetingHint(ini, "C:\Rec\x - Town hall - 2a2b3c4d.wav")
+        Check(StrLen(long) <= 400 && InStr(long, "Town hall. Person Number1, "), "A long attendee list must be cut to 400 characters, got " StrLen(long))
+        cmd := TranscribeCommand("py.exe", "C:\App", wav, "s.ini", "t.tsv", hint)
+        Check(SubStr(cmd, -StrLen(hint) - 1) = ' "Weekly sync. Kari Nordmann, Øyvind Ås, Ola Hansen."', "The hint must be the last argument, without inner quotes: " cmd)
+    } finally {
+        try DirDelete(tmp, true)
+    }
 }
 
 ; #7: reuse PodcastClipper's portable WhisperX; this app's own install wins when both exist.
@@ -352,15 +400,20 @@ TestTranscribeSpeech() {
     status := tmp "\transcribe.ini", segments := tmp "\transcribe.tsv"
     try {
         RunWait(PowerShell() " -File " Q(Root "\tests\Make-SpeechWav.ps1") " -Output " Q(wav)
-            . ' -Others "Good morning everyone. Shall we look at the budget?" -Me "Yes. Let us begin with the numbers."', , "Hide")
+            . ' -Others "Good morning everyone. Shall we look at the budget with Kenneth Aar?" -Me "Yes. Let us begin with the numbers."', , "Hide")
         Check(FileExist(wav), "Test speech was not generated")
-        RunWait(TranscribeCommand(py, Root, wav, status, segments), , "Hide")
+        ; #10: the meeting hint makes the speech model spell the name right.
+        RunWait(TranscribeCommand(py, Root, wav, status, segments, "Budget. Kenneth Aar."), , "Hide")
         state := IniRead(status, "Transcribe", "State", "(no status)")
         Check(state = "Done", "Transcriber ended in " state ": " IniRead(status, "Transcribe", "Detail", "") "`n" (FileExist(status ".log") ? SubStr(FileRead(status ".log"), -1500) : ""))
         WriteTranscript(wav, segments)
         text := FileRead(TranscriptPath(wav, "txt"), "UTF-8")
         Check(RegExMatch(text, "is)^\[00:00:0\d\] Others: [^\r\n]*budget.*\R\R\[00:00:\d\d\] Me: [^\r\n]*numbers"), "Transcript was:`n" text)
+        Check(InStr(text, "Kenneth Aar", true), "The name from the hint was not spelled right:`n" text)
         Check(InStr(FileRead(TranscriptPath(wav, "srt"), "UTF-8"), "Me: "), "Subtitles were not written")
+        ; #10: half the logical cores is as fast as all but one, and leaves the PC free for the call.
+        threads := Max(1, EnvGet("NUMBER_OF_PROCESSORS") // 2)
+        Check(RegExMatch(FileRead(status ".log", "UTF-8"), "m)^Threads: " threads "$"), "The transcriber did not use " threads " threads")
     } finally {
         try DirDelete(tmp, true)
     }

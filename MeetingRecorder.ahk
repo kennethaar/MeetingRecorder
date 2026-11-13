@@ -3,7 +3,7 @@
 Persistent
 ; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
 TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
-AppVersion := "0.4.1"
+AppVersion := "0.5.0"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -16,6 +16,7 @@ InCall := false        ; a Teams call is using the microphone
 Offering := false      ; the panel offers to record that call
 CallEnded := false     ; the call ended while recording; the panel offers Stop or Keep recording
 MeetingTitle := ""     ; the Outlook meeting for the current call, or ""
+MeetingPeople := ""    ; its attendees, for the transcript hint (#10)
 PanelWasVisible := false
 State := "Manual only"
 Child := 0
@@ -125,7 +126,7 @@ Repair(*) {
  Run(PSCommand("Setup") " -Status " Q(StatusPath),, "Hide", &Child)
 }
 Toggle(*) {
- global State, Child, Folder, StatusPath, StopPath, StartTick, Action, InCall, MeetingTitle
+ global State, Child, Folder, StatusPath, StopPath, StartTick, Action, InCall, MeetingTitle, MeetingPeople
  if State = "Recording" || State = "Starting" {
   StopRecording()
   return
@@ -145,7 +146,10 @@ Toggle(*) {
   FileAppend("test",probe), FileDelete(probe)
   try FileDelete(StopPath)
   try FileDelete(StatusPath)
-  name := RecordingName(Folder, InCall ? MeetingTitle : "", FormatTime(,"yyyy-MM-dd HHmmss"), SubStr(CreateGuid(),1,8))
+  id := SubStr(CreateGuid(),1,8), title := InCall ? MeetingTitle : ""
+  name := RecordingName(Folder, title, FormatTime(,"yyyy-MM-dd HHmmss"), id)
+  if title != ""
+   try SaveMeetingHint(AppDir "\meetings.ini", id, title, MeetingPeople)   ; never blocks a recording
   State := "Starting"
   ShowState()
   Action.Text := "Stop"
@@ -628,7 +632,7 @@ StartTranscribe(wav) {
    Run(PSCommand("Transcriber") " -Status " Q(TxSetupPath),, "Hide", &TxPid)
   } else {
    TxState := "Working", TxDetail := "Loading the speech model"
-   Run(TranscribeCommand(py, A_ScriptDir, wav, TxStatusPath, TxSegmentsPath),, "Hide", &TxPid)
+   Run(TranscribeCommand(py, A_ScriptDir, wav, TxStatusPath, TxSegmentsPath, MeetingHint(AppDir "\meetings.ini", wav)),, "Hide", &TxPid)
   }
  } catch as e {
   TranscribeFailed(e.Message)
@@ -719,8 +723,10 @@ FindTranscriber(appData) {
    return dir "\python.exe"
  return ""
 }
-TranscribeCommand(py, appDir, wav, status, segments) {
- return Q(py) " -u " Q(appDir "\Transcribe.py") " " Q(wav) " " Q(status) " " Q(segments)
+; hint: meeting title and names for the speech model (#10). Quotes and backslashes would break
+; the command line, so they are left out.
+TranscribeCommand(py, appDir, wav, status, segments, hint := "") {
+ return Q(py) " -u " Q(appDir "\Transcribe.py") " " Q(wav) " " Q(status) " " Q(segments) " " Q(RegExReplace(hint,'["\\]'))
 }
 TranscriptPath(wav, ext) {
  return RegExReplace(wav,"i)\.wav$") "." ext
@@ -743,14 +749,17 @@ WriteTranscript(wav, segmentsPath) {
   f.Close()
  }
 }
-; In time order; lines in a row from the same person become one turn.
+; In time order; lines in a row from the same person become one turn. A pause of 2 s or more
+; in a turn starts a new paragraph with its own time (#10).
 TranscriptText(segments) {
- text := "", speaker := ""
+ text := "", speaker := "", last := 0
  for s in SortSegments(segments) {
-  if s.speaker == speaker
-   text .= " " s.text
-  else text .= (text = "" ? "" : "`r`n`r`n") "[" Clock(s.start,false) "] " s.speaker ": " s.text
-  speaker := s.speaker
+  if s.speaker !== speaker
+   text .= (text = "" ? "" : "`r`n`r`n") "[" Clock(s.start,false) "] " s.speaker ": " s.text
+  else if s.start - last >= 2
+   text .= "`r`n`r`n[" Clock(s.start,false) "] " s.text
+  else text .= " " s.text
+  speaker := s.speaker, last := s.end
  }
  return text = "" ? "No speech was found in this recording.`r`n" : text "`r`n"
 }
@@ -781,13 +790,15 @@ Clock(seconds, withMs) {
 ; ---------------------------------------------------------------- Teams calls and Outlook meetings
 ; Every 2 s. Offers to record when a Teams call starts; never starts a recording by itself.
 DetectCall() {
- global InCall, CallEnded, MeetingTitle, State, DetectOn, CalendarOn, Offering, NotNow
+ global InCall, CallEnded, MeetingTitle, MeetingPeople, State, DetectOn, CalendarOn, Offering, NotNow
  active := DetectOn && TeamsCallActive()
  if active = InCall
   return
  InCall := active
  if active {
-  MeetingTitle := CalendarOn ? PickMeeting(OutlookMeetings(), A_Now) : ""
+  MeetingTitle := "", MeetingPeople := ""
+  if CalendarOn
+   MeetingTitle := PickMeeting(OutlookMeetings(), A_Now, &MeetingPeople)
   if State = "Manual only"
    OfferCall()
  } else if Offering {
@@ -861,17 +872,53 @@ RegQword(key, name) {
 
 ; The meeting that names the recording: running now or starting within 10 minutes, not
 ; all-day; when several fit, the one whose start is closest to now. "" when none fits.
-PickMeeting(meetings, now) {
- best := "", bestGap := -1
+; people gets its attendees ("Name; Name", as Outlook gives them).
+PickMeeting(meetings, now, &people := "") {
+ best := "", bestGap := -1, people := ""
  soon := DateAdd(now,10,"Minutes")
  for m in meetings {
   if m.allDay || m.start = "" || m.end = "" || m.start > soon || m.end <= now
    continue
   gap := Abs(DateDiff(m.start,now,"Seconds"))
   if bestGap < 0 || gap < bestGap
-   best := m.subject, bestGap := gap
+   best := m.subject, bestGap := gap, people := m.HasProp("people") ? m.people : ""
  }
  return best
+}
+
+; #10: the meeting title and attendees, kept when a recording starts, so a transcript made
+; later can spell names right. Keyed by the recording's 8-hex id; UTF-16 for names like Ø.
+SaveMeetingHint(ini, id, title, people) {
+ if !FileExist(ini)
+  FileAppend("", ini, "UTF-16")
+ IniWrite(title, ini, id, "Title")
+ IniWrite(people, ini, id, "People")
+}
+; The hint for the speech model: "Title. First Last, First Last." at most 400 characters.
+; Without stored details, the title in the file name; "Recording" (no meeting) gives "".
+MeetingHint(ini, wav) {
+ SplitPath(wav,,,,&base)
+ if !RegExMatch(base,"i)^(?:\d{4}-\d\d-\d\d \d{6} - )?(.*) - ([0-9a-f]{8})(?: - .*)?$",&m)
+  return ""
+ title := m[1] = "Recording" ? "" : m[1], people := ""
+ try title := IniRead(ini, m[2], "Title", title), people := IniRead(ini, m[2], "People", "")
+ title := RegExReplace(Trim(title),"[.\s]+$")
+ if title = ""
+  return ""
+ hint := title ".", names := ""
+ for p in StrSplit(people, ";") {
+  p := Trim(p)
+  if p = "" || InStr(p,"@")
+   continue
+  if RegExMatch(p,"^([^,]+),\s*([^,]+)$",&n)   ; "Last, First"
+   p := n[2] " " n[1]
+  if InStr(", " names ",", ", " p ",")
+   continue
+  if StrLen(hint) + StrLen(names) + StrLen(p) + 4 > 400
+   break
+  names .= (names = "" ? "" : ", ") p
+ }
+ return names = "" ? hint : hint " " names "."
 }
 
 ; Today's meetings from classic Outlook, only while it is running. Never starts Outlook.
@@ -885,7 +932,8 @@ OutlookMeetings() {
   found := items.Restrict('@SQL=%today("urn:schemas:calendar:dtstart")%')
   item := found.GetFirst()
   while IsObject(item) && A_Index <= 200 {
-   meetings.Push({subject: item.Subject, start: ComDateToStamp(item.Start), end: ComDateToStamp(item.End), allDay: item.AllDayEvent})
+   meetings.Push({subject: item.Subject, start: ComDateToStamp(item.Start), end: ComDateToStamp(item.End), allDay: item.AllDayEvent,
+    people: item.RequiredAttendees "; " item.OptionalAttendees})
    item := found.GetNext()
   }
  }
@@ -1011,7 +1059,7 @@ HelpTopics() {
                 ["Saved.Hide", "Hide. Transcribing goes on."],
             ],
             view: "Saved",
-            more: "Others is what you heard. Me is your microphone. Transcribe again replaces the transcript you have. To get this window back, choose Latest recording in the tray menu. The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. A long meeting can take about as long to transcribe as it lasted. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
+            more: "Others is what you heard. Me is your microphone. Transcribe again replaces the transcript you have. To get this window back, choose Latest recording in the tray menu. The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. A pause of 2 seconds starts a new paragraph with its own time. If the recording is named after an Outlook meeting, its title and the names of the people invited help spell names right. They are kept in %LOCALAPPDATA%\MeetingRecorder\meetings.ini. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. A long meeting can take about as long to transcribe as it lasted. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
         },
         {
             id: "tray",
