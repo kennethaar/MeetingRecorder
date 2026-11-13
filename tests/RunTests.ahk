@@ -22,6 +22,9 @@ Tests := [
     ["Recording is named after the meeting running now (#5)", TestMeetingName],
     ["Outlook dates are read in any locale (#5)", TestComDate],
     ["Questions from the Recording saved window show on top of it (#6)", TestNoticeBoxOnTop],
+    ["Transcript says who spoke when, as text and subtitles (#7)", TestTranscriptText],
+    ["WhisperX is found in this app's or PodcastClipper's install (#7)", TestFindTranscriber],
+    ["A recording is transcribed on this PC into Others and Me (#7)", TestTranscribeSpeech],
 ]
 Failures := 0, Ran := 0
 for t in Tests {
@@ -280,6 +283,80 @@ TestNoticeBoxOnTop() {
                 noticeAt := A_Index
         seen.result := boxAt && noticeAt && boxAt < noticeAt ? "" : "The question opened behind the Recording saved window"
         ControlClick("Button2", box)
+    }
+}
+
+; #7: the transcript reads as a conversation. The two channels come back one after the other;
+; the text puts them in time order and joins lines in a row from the same person into one turn.
+; The subtitles keep every line with its exact times.
+TestTranscriptText() {
+    S(start, end, speaker, text) => {start: start, end: end, speaker: speaker, text: text}
+    ; As Transcribe.py returns them: all of Others first, then all of Me.
+    segs := [
+        S(0.5, 2.0, "Others", "Good morning."),
+        S(2.2, 4.0, "Others", "Shall we start?"),
+        S(3725.04, 3727.5, "Others", "Thanks, bye."),
+        S(4.5, 6.0, "Me", "Yes, go ahead."),
+    ]
+    text := "[00:00:00] Others: Good morning. Shall we start?`r`n`r`n"
+        . "[00:00:04] Me: Yes, go ahead.`r`n`r`n"
+        . "[01:02:05] Others: Thanks, bye.`r`n"
+    Check(TranscriptText(segs) = text, "Transcript text was:`n" TranscriptText(segs))
+    srt := "1`r`n00:00:00,500 --> 00:00:02,000`r`nOthers: Good morning.`r`n`r`n"
+        . "2`r`n00:00:02,200 --> 00:00:04,000`r`nOthers: Shall we start?`r`n`r`n"
+        . "3`r`n00:00:04,500 --> 00:00:06,000`r`nMe: Yes, go ahead.`r`n`r`n"
+        . "4`r`n01:02:05,040 --> 01:02:07,500`r`nOthers: Thanks, bye.`r`n"
+    Check(SubtitleText(segs) = srt, "Subtitles were:`n" SubtitleText(segs))
+    Check(TranscriptText([]) = "No speech was found in this recording.`r`n", "Silent recording gave: " TranscriptText([]))
+    Check(TranscriptPath("C:\Rec\a - Incomplete.wav", "txt") = "C:\Rec\a - Incomplete.txt", "Transcript must sit next to the WAV with the same name")
+}
+
+; #7: reuse PodcastClipper's portable WhisperX; this app's own install wins when both exist.
+; A Python without the whisperx package does not count.
+TestFindTranscriber() {
+    tmp := A_Temp "\MeetingRecorder-test-" A_TickCount
+    own := tmp "\MeetingRecorder\transcriber"
+    clipper := tmp "\PodcastEditorTools\whisperx-python"
+    try {
+        DirCreate(tmp)
+        Check(FindTranscriber(tmp) = "", "Nothing installed, but found " FindTranscriber(tmp))
+        DirCreate(clipper), FileAppend("", clipper "\python.exe")
+        Check(FindTranscriber(tmp) = "", "Python without WhisperX was accepted")
+        DirCreate(clipper "\Lib\site-packages\whisperx")
+        Check(FindTranscriber(tmp) = clipper "\python.exe", "PodcastClipper's WhisperX was not found")
+        DirCreate(own "\Lib\site-packages\whisperx"), FileAppend("", own "\python.exe")
+        Check(FindTranscriber(tmp) = own "\python.exe", "This app's own install must win, got " FindTranscriber(tmp))
+    } finally {
+        try DirDelete(tmp, true)
+    }
+}
+
+; #7: end to end with the real WhisperX on this PC. Windows' voice speaks for Others on the left,
+; then for Me on the right; the transcript next to the WAV must say who said what, in order.
+; Uses the cached large-v3 model, so it takes a minute or two.
+TestTranscribeSpeech() {
+    py := FindTranscriber(EnvGet("LOCALAPPDATA"))
+    if py = "" {
+        Out("      skipped: WhisperX is not installed on this PC")
+        return
+    }
+    tmp := A_Temp "\MeetingRecorder-test-" A_TickCount
+    DirCreate(tmp)
+    wav := tmp "\2026-11-13 093000 - Budget - 1a2b3c4d.wav"
+    status := tmp "\transcribe.ini", segments := tmp "\transcribe.tsv"
+    try {
+        RunWait(PowerShell() " -File " Q(Root "\tests\Make-SpeechWav.ps1") " -Output " Q(wav)
+            . ' -Others "Good morning everyone. Shall we look at the budget?" -Me "Yes. Let us begin with the numbers."', , "Hide")
+        Check(FileExist(wav), "Test speech was not generated")
+        RunWait(TranscribeCommand(py, Root, wav, status, segments), , "Hide")
+        state := IniRead(status, "Transcribe", "State", "(no status)")
+        Check(state = "Done", "Transcriber ended in " state ": " IniRead(status, "Transcribe", "Detail", "") "`n" (FileExist(status ".log") ? SubStr(FileRead(status ".log"), -1500) : ""))
+        WriteTranscript(wav, segments)
+        text := FileRead(TranscriptPath(wav, "txt"), "UTF-8")
+        Check(RegExMatch(text, "is)^\[00:00:0\d\] Others: [^\r\n]*budget.*\R\R\[00:00:\d\d\] Me: [^\r\n]*numbers"), "Transcript was:`n" text)
+        Check(InStr(FileRead(TranscriptPath(wav, "srt"), "UTF-8"), "Me: "), "Subtitles were not written")
+    } finally {
+        try DirDelete(tmp, true)
     }
 }
 

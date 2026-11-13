@@ -10,7 +10,9 @@ if (!(Test-Path $ahk)) { throw "AutoHotkey v2 not found at $ahk" }
 $testDir = Join-Path ([IO.Path]::GetTempPath()) 'MeetingRecorder-tests'
 New-Item -ItemType Directory -Force $testDir | Out-Null
 $app = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\MeetingRecorder.ahk'))
-$functions = 'HelpTopics', 'TeamsCallActive', 'RegQword', 'PickMeeting', 'ComDateToStamp', 'RecordingName', 'NoticeBox'
+$functions = 'HelpTopics', 'TeamsCallActive', 'RegQword', 'PickMeeting', 'ComDateToStamp', 'RecordingName', 'NoticeBox',
+    'TranscriptText', 'SubtitleText', 'Clock', 'SortSegments', 'TranscriptPath', 'FindTranscriber',
+    'TranscribeCommand', 'ReadSegments', 'WriteTranscript'
 $code = foreach ($name in $functions) {
     $m = [regex]::Match($app, "(?ms)^$name\([^)\r\n]*\) \{.*?^\}")
     if ($m.Success) { $m.Value } else { "$name(*) {`n    throw Error(`"No $name() function in MeetingRecorder.ahk`")`n}" }

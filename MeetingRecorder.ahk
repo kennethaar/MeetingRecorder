@@ -1,7 +1,7 @@
 ﻿#Requires AutoHotkey v2.0
 #SingleInstance Ignore
 Persistent
-AppVersion := "0.2.1"
+AppVersion := "0.3.0"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -22,6 +22,12 @@ StopPath := AppDir "\stop.signal"
 StartTick := 0
 Closing := false
 Completion := 0
+CompletionWav := ""    ; the recording the Recording saved window is about
+; Transcription on this PC (#7). TxState: "", "Installing", "Working", "Error".
+TxState := "", TxWav := "", TxPid := 0, TxStart := 0, TxPercent := 0, TxDetail := ""
+TxStatusPath := AppDir "\transcribe.ini"
+TxSegmentsPath := AppDir "\transcribe.tsv"
+TxSetupPath := AppDir "\transcriber-setup.ini"
 Panel := Gui("+AlwaysOnTop +ToolWindow +E0x08000000", "Meeting Recorder")
 Panel.SetFont("s10", "Segoe UI")
 Label := Panel.AddText("vStatus w350", "Preparing audio backend...")
@@ -128,7 +134,7 @@ StopRecording(*) {
  Label.Text := "Saving recording..."
 }
 Poll() {
- global State, Child, StatusPath, StartTick, Label, Action, Latest, Config, Closing, CallEnded
+ global State, Child, StatusPath, StartTick, Label, Action, Latest, Config, Closing, CallEnded, TxState, TxPercent
  if FileExist(StatusPath) {
   s := IniRead(StatusPath,"Capture","State","")
   detail := IniRead(StatusPath,"Capture","Detail","")
@@ -163,7 +169,7 @@ Poll() {
   elapsed := Format("{:02}:{:02}:{:02}",seconds//3600,Mod(seconds//60,60),Mod(seconds,60))
   Label.Text := (CallEnded ? "Teams call ended. Recording  " : "Recording  ") elapsed
   A_IconTip := "Meeting Recorder`nRecording: " elapsed
- } else A_IconTip := "Meeting Recorder`n" State
+ } else A_IconTip := "Meeting Recorder`n" State (TxState = "Working" ? "`nTranscribing " TxPercent "%" : "")
  if Child && !ProcessExist(Child) {
   Child := 0
   if State = "Recording" || State = "Starting" || State = "Saving" || State = "Installing" {
@@ -182,16 +188,20 @@ ShortcutText() {
  return Shortcut = "^!r" ? "Ctrl + Alt + R" : Shortcut
 }
 SavedNotice(kind,detail) {
- global Completion
+ global Completion, CompletionWav, Latest
  if IsObject(Completion)
   Completion.Destroy()
+ CompletionWav := Latest
  Completion := Gui("+AlwaysOnTop +ToolWindow +E0x08000000","Recording saved")
  Completion.SetFont("s10","Segoe UI")
  Completion.AddText("w480",kind = "Saved" ? "Recording saved" : "Recording saved, but incomplete")
  Completion.AddText("w480",detail)
- Completion.AddButton("vWord w130","Open in Word").OnEvent("Click",WordHandoff)
+ Completion.AddText("vTranscribeStatus w480 Hidden")
+ Completion.AddProgress("vTranscribeProgress w480 h10 Hidden")
+ Completion.AddButton("vTranscribe w130","Transcribe").OnEvent("Click",TranscribeClick)
  Completion.AddButton("vShowFile x+8 w110","Show file").OnEvent("Click",ShowLatest)
  Completion.AddButton("vDismiss x+8 w80","Dismiss").OnEvent("Click",(*) => Completion.Hide())
+ ShowTranscribeState()
  Completion.Show("NoActivate")
 }
 ; The Recording saved window is always on top; messages opened from it must be too (#6).
@@ -207,21 +217,6 @@ ShowLatest(*) {
 OpenFolder(*) {
  global Folder
  Run("explorer.exe " Q(Folder))
-}
-WordHandoff(*) {
- global Config
- if IniRead(Config,"Settings","CloudNotice",0) != 1 {
-  if NoticeBox("Word Transcribe uploads audio to OneDrive. This app does not upload anything.`n`nContinue to Word?","Word handoff","YesNo") != "Yes"
-   return
-  IniWrite(1,Config,"Settings","CloudNotice")
- }
- ShowLatest()
- try Run("winword.exe")
- catch {
-  NoticeBox("Word could not open. Your recording is still saved and selected in Explorer.","Word unavailable")
-  return
- }
- NoticeBox("In Word: Home > Dictate > Transcribe > Upload audio.`nSelect the WAV file shown in Explorer. Access to Transcribe depends on your account.","Upload your recording")
 }
 Settings(*) {
  global Folder, Config, Shortcut, DetectOn, CalendarOn
@@ -300,6 +295,190 @@ ExitHandler(reason,code) {
   if Child
    try ProcessWaitClose(Child,8)
  }
+ StopTranscriber()
+}
+
+; ---------------------------------------------------------------- transcription on this PC (#7)
+; Transcribe.py runs WhisperX on the saved WAV and reports through transcribe.ini; the app then
+; writes <recording>.txt and .srt next to the WAV. Left channel = Others, right = Me.
+TranscribeClick(*) {
+ global CompletionWav, TxWav, TxState
+ wav := CompletionWav
+ if TxWav = wav && (TxState = "Working" || TxState = "Installing") {
+  StopTranscriber()
+  ShowTranscribeState()
+ } else if FileExist(TranscriptPath(wav,"txt")) {
+  Run(Q(TranscriptPath(wav,"txt")))
+ } else if TxState = "Working" || TxState = "Installing" {
+  NoticeBox("Another recording is being transcribed. Try again when it is done.","Transcribe")
+ } else if !FileExist(wav) {
+  NoticeBox("The recording is no longer in its folder, so it cannot be transcribed.","Transcribe")
+ } else StartTranscribe(wav)
+}
+StartTranscribe(wav) {
+ global TxState, TxWav, TxPid, TxStart, TxPercent, TxDetail, TxStatusPath, TxSegmentsPath, TxSetupPath
+ py := FindTranscriber(EnvGet("LOCALAPPDATA"))
+ if py = "" && TxState = "Installing" {
+  TranscribeFailed("Setup finished, but the transcriber was not found. Try again.")
+  return
+ }
+ if py = "" && NoticeBox("Transcribing runs on this PC, so nothing is uploaded. It needs a one-time download of about 5 GB.`n`nDownload now?","Get the transcriber","YesNo") != "Yes"
+  return
+ for path in [TxStatusPath, TxSegmentsPath, TxSetupPath]
+  try FileDelete(path)
+ TxWav := wav, TxStart := A_TickCount, TxPercent := 0
+ try {
+  if py = "" {
+   TxState := "Installing", TxDetail := "Getting the transcriber ready"
+   Run(PSCommand("Transcriber") " -Status " Q(TxSetupPath),, "Hide", &TxPid)
+  } else {
+   TxState := "Working", TxDetail := "Loading the speech model"
+   Run(TranscribeCommand(py, A_ScriptDir, wav, TxStatusPath, TxSegmentsPath),, "Hide", &TxPid)
+  }
+ } catch as e {
+  TranscribeFailed(e.Message)
+  return
+ }
+ SetTimer(TranscribePoll, 500)
+ ShowTranscribeState()
+}
+TranscribePoll() {
+ global TxState, TxWav, TxPid, TxPercent, TxDetail, TxStatusPath, TxSegmentsPath, TxSetupPath
+ alive := TxPid && ProcessExist(TxPid)   ; checked before the status, so a final status is never missed
+ if TxState = "Installing" {
+  s := IniRead(TxSetupPath,"Capture","State","")
+  if s = "Ready" {
+   TxPid := 0
+   StartTranscribe(TxWav)
+  } else if s = "Error" || !alive
+   TranscribeFailed(s = "Error" ? IniRead(TxSetupPath,"Capture","Detail","") : "Setup stopped before it was done.")
+ } else if TxState = "Working" {
+  s := IniRead(TxStatusPath,"Transcribe","State","")
+  TxPercent := IniRead(TxStatusPath,"Transcribe","Percent",TxPercent)
+  TxDetail := IniRead(TxStatusPath,"Transcribe","Detail",TxDetail)
+  if s = "Done" {
+   try {
+    WriteTranscript(TxWav, TxSegmentsPath)
+    TxState := "", TxPid := 0
+    SetTimer(TranscribePoll, 0)
+    AnnounceTranscript()
+   } catch as e
+    TranscribeFailed("The transcript could not be saved next to the recording. " e.Message)
+  } else if s = "Error" || !alive
+   TranscribeFailed(s = "Error" ? IniRead(TxStatusPath,"Transcribe","Detail","") : "The transcriber stopped before it was done.")
+ }
+ ShowTranscribeState()
+}
+TranscribeFailed(detail) {
+ global TxState, TxDetail, TxPid
+ SetTimer(TranscribePoll, 0)
+ TxState := "Error", TxDetail := detail, TxPid := 0
+ AnnounceTranscript()
+}
+; Bring back the Recording saved window if it is about this recording; otherwise a tray message.
+AnnounceTranscript() {
+ global Completion, CompletionWav, TxWav, TxState
+ ShowTranscribeState()
+ if IsObject(Completion) && CompletionWav = TxWav
+  Completion.Show("NoActivate")
+ else {
+  SplitPath(TxWav,,,,&name)
+  TrayTip(name, TxState = "Error" ? "Transcription failed" : "Transcript ready")
+ }
+}
+StopTranscriber() {
+ global TxState, TxPid
+ SetTimer(TranscribePoll, 0)
+ if TxPid && ProcessExist(TxPid)
+  RunWait(A_ComSpec " /c taskkill /PID " TxPid " /T /F",, "Hide")
+ TxState := "", TxPid := 0
+}
+; Shows the transcription state of the recording the Recording saved window is about.
+ShowTranscribeState() {
+ global Completion, CompletionWav, TxWav, TxState, TxStart, TxPercent, TxDetail
+ if !IsObject(Completion)
+  return
+ status := Completion["TranscribeStatus"], bar := Completion["TranscribeProgress"], button := Completion["Transcribe"]
+ busy := TxWav = CompletionWav && (TxState = "Working" || TxState = "Installing")
+ if busy {
+  status.Text := TxDetail "...  " (A_TickCount - TxStart)//60000 " min. You can keep working."
+  bar.Value := TxPercent
+  button.Text := "Cancel"
+ } else if FileExist(TranscriptPath(CompletionWav,"txt")) {
+  status.Text := "Transcript ready"
+  button.Text := "Open transcript"
+ } else if TxWav = CompletionWav && TxState = "Error" {
+  status.Text := "Transcription failed: " TxDetail
+  button.Text := "Try again"
+ } else button.Text := "Transcribe"
+ status.Visible := busy || button.Text != "Transcribe"
+ bar.Visible := busy
+}
+
+; WhisperX in a portable Python: this app's own install, else the one PodcastClipper made.
+FindTranscriber(appData) {
+ for dir in [appData "\MeetingRecorder\transcriber", appData "\PodcastEditorTools\whisperx-python"]
+  if FileExist(dir "\python.exe") && DirExist(dir "\Lib\site-packages\whisperx")
+   return dir "\python.exe"
+ return ""
+}
+TranscribeCommand(py, appDir, wav, status, segments) {
+ return Q(py) " -u " Q(appDir "\Transcribe.py") " " Q(wav) " " Q(status) " " Q(segments)
+}
+TranscriptPath(wav, ext) {
+ return RegExReplace(wav,"i)\.wav$") "." ext
+}
+; Transcribe.py output: one start<TAB>end<TAB>speaker<TAB>text line per segment.
+ReadSegments(path) {
+ segments := []
+ for line in StrSplit(FileRead(path,"UTF-8"),"`n","`r") {
+  f := StrSplit(line,"`t",,4)
+  if f.Length = 4 && IsNumber(f[1]) && IsNumber(f[2])
+   segments.Push({start: Number(f[1]), end: Number(f[2]), speaker: f[3], text: f[4]})
+ }
+ return segments
+}
+WriteTranscript(wav, segmentsPath) {
+ segments := ReadSegments(segmentsPath)
+ for ext, text in Map("txt",TranscriptText(segments),"srt",SubtitleText(segments)) {
+  f := FileOpen(TranscriptPath(wav,ext),"w","UTF-8")
+  f.Write(text)
+  f.Close()
+ }
+}
+; In time order; lines in a row from the same person become one turn.
+TranscriptText(segments) {
+ text := "", speaker := ""
+ for s in SortSegments(segments) {
+  if s.speaker == speaker
+   text .= " " s.text
+  else text .= (text = "" ? "" : "`r`n`r`n") "[" Clock(s.start,false) "] " s.speaker ": " s.text
+  speaker := s.speaker
+ }
+ return text = "" ? "No speech was found in this recording.`r`n" : text "`r`n"
+}
+SubtitleText(segments) {
+ text := ""
+ for s in SortSegments(segments)
+  text .= (A_Index > 1 ? "`r`n" : "") A_Index "`r`n" Clock(s.start,true) " --> " Clock(s.end,true) "`r`n" s.speaker ": " s.text "`r`n"
+ return text
+}
+; Stable sort by start time.
+SortSegments(segments) {
+ sorted := []
+ for s in segments {
+  i := sorted.Length
+  while i >= 1 && sorted[i].start > s.start
+   i--
+  sorted.InsertAt(i+1,s)
+ }
+ return sorted
+}
+; HH:MM:SS, or HH:MM:SS,mmm for subtitles.
+Clock(seconds, withMs) {
+ ms := Round(seconds*1000)
+ t := Format("{:02}:{:02}:{:02}",ms//3600000,Mod(ms//60000,60),Mod(ms//1000,60))
+ return withMs ? t "," Format("{:03}",Mod(ms,1000)) : t
 }
 
 ; ---------------------------------------------------------------- Teams calls and Outlook meetings
@@ -505,23 +684,25 @@ HelpTopics() {
             more: "The Outlook choice is shown only when classic Outlook is installed. Settings are kept in %LOCALAPPDATA%\MeetingRecorder\settings.ini.",
         },
         {
-            id: "word",
-            title: "Open in Word",
-            words: "word transcribe transcript text onedrive upload saved",
-            what: "Send a saved recording to Word Transcribe to get it as text.",
+            id: "transcribe",
+            title: "Transcribe a recording",
+            words: "transcribe transcript text subtitles srt whisper whisperx word notes minutes saved",
+            what: "Turns a saved recording into text on this PC. Nothing is uploaded. What the others said is marked Others. What you said is marked Me.",
             steps: [
-                "When a recording is saved, click Open in Word.",
-                "In Word, choose Home, Dictate, Transcribe, Upload audio.",
-                "Pick the WAV file shown in Explorer.",
+                "When a recording is saved, click Transcribe.",
+                "Keep working. The bar shows how far it has come.",
+                "Click Open transcript when it is ready.",
             ],
             keys: [],
             legend: [
-                ["Saved.Word", "Open Word and show the file"],
-                ["Saved.ShowFile", "Show the file in Explorer"],
-                ["Saved.Dismiss", "Close this message"],
+                ["?Saved.TranscribeStatus", "What the transcriber is doing"],
+                ["?Saved.TranscribeProgress", "How far it has come"],
+                ["Saved.Transcribe", "Transcribe, cancel, or open the transcript"],
+                ["Saved.ShowFile", "Show the recording in Explorer"],
+                ["Saved.Dismiss", "Close this window. Transcribing goes on."],
             ],
             view: "Saved",
-            more: "Word uploads the audio to OneDrive. This app uploads nothing. Whether you can use Transcribe depends on your Microsoft account.",
+            more: "The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. A long meeting can take about as long to transcribe as it lasted. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
         },
         {
             id: "recovery",

@@ -23,13 +23,14 @@ Requirements: Windows 10/11, AutoHotkey v2, Windows PowerShell 5.1 and .NET Fram
 - Device-state and process monitoring; incomplete recordings labelled separately.
 - Stop-file IPC, safe normal exit, controller-loss handling, suspend stop attempt.
 - Startup recovery of this draft's partial WAVs in the configured recording folder. Originals remain if recovery fails.
-- Completion panel, latest recording, Explorer selection and optional Word handoff with cloud notice.
+- Completion panel, latest recording and Explorer selection.
+- Transcription on this PC with WhisperX (large-v3, CPU): left channel labelled Others, right Me; saves `.txt` and `.srt` next to the WAV. Reuses PodcastClipper's portable WhisperX when present, otherwise installs a portable Python + WhisperX 3.8.6 once in %LOCALAPPDATA%\MeetingRecorder\transcriber (about 5 GB with the model).
 - Settings and dependencies under %LOCALAPPDATA%\MeetingRecorder, separate from source.
 
 ## Deliberately not implemented
 - Automatic call detection, countdown, grace period and suppression. There are no tested supported calling apps yet, so automation is not offered.
 - ICS calendars and naming. No calendar URLs are collected or stored.
-- Fixed-device selection, level meters, automated channel test, reconnect, startup registration and automatic Word launch.
+- Fixed-device selection, level meters, automated channel test, reconnect, startup registration.
 - Production-grade timestamp synchronization or drift correction. Clock-paced buffered mixing is a draft, not proof of two-hour synchronization. Capture start offset and silence-to-audio transitions need testing. The resampling queue can introduce gaps or offsets under scheduling/device-clock stress.
 - A missing microphone callback without a device-state change may produce silence rather than a detected fault. Hardware mute, Bluetooth profiles, audio service restart and device-switch behaviour are unverified.
 - Guaranteed recovery after storage failure, forced shutdown or physical disk failure.
@@ -39,7 +40,7 @@ This is source code for a first manual-recording build, NOT a verified productio
 
 The writer stops at five hours to stay below classic RIFF's 4 GB size limit. Start another recording for longer sessions. A startup recovery scans only the currently configured folder; changing folders does not scan old folders. Recovery of an empty header produces an incomplete file, not proof of useful audio. There is no automatic deletion.
 
-Output includes unrelated media and notifications. Call mute may not mute the directly captured microphone. Participants receive no notification. Follow your organization's recording rules. The recorder does not upload audio. Word Transcribe uploads audio to OneDrive after the user chooses Upload audio.
+Output includes unrelated media and notifications. Call mute may not mute the directly captured microphone. Participants receive no notification. Follow your organization's recording rules. The recorder does not upload audio; transcription runs on this PC. Downloads happen only for the one-time transcriber install and the speech models WhisperX fetches on first use.
 
 A normal stop drains buffered audio. If capture fails, the saved incomplete file may omit queued tail audio. A forced termination can leave up to the last header checkpoint unreferenced until recovery. Recovery repairs the fixed 44-byte PCM header used by this writer, not arbitrary WAV files.
 
@@ -55,8 +56,9 @@ A normal stop drains buffered audio. If capture fails, the saved incomplete file
 - Verify the panel does not steal typing focus and cannot be closed while recording.
 
 ## Architecture
-MeetingRecorder.ahk: orchestration, UI, settings, handoff and in-app help topics. Holds `AppVersion`.
-Backend.ps1: pinned dependency bootstrap, C# compilation, startup recovery.
+MeetingRecorder.ahk: orchestration, UI, settings, transcript files and in-app help topics. Holds `AppVersion`.
+Backend.ps1: pinned dependency bootstrap, C# compilation, startup recovery, transcriber install.
+Transcribe.py: runs WhisperX on each channel of a saved WAV and reports progress through a status file.
 Capture.cs: WASAPI capture, mono conversion, resampling, stereo writing and status IPC.
 WhatsNew.generated.ahk: in-app copy of the changelog, made by `tools\Build-WhatsNew.ps1`.
 
@@ -74,6 +76,6 @@ No prebuilt executable is included. PowerShell compiles the helper in memory at 
 - https://www.nuget.org/packages/NAudio.Wasapi/2.2.1
 - https://github.com/naudio/NAudio/tree/v2.2.1
 - https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording
-- https://support.microsoft.com/en-us/word/transcribe-your-recordings
+- https://github.com/m-bain/whisperX
 
 NAudio is a third-party MIT-licensed dependency. Review and include upstream license notices before redistributing binaries. This package contains original helper source, not NAudio binaries.

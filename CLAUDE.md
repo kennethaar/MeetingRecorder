@@ -9,7 +9,8 @@ there is no build artifact.
 
 - Source lives in the repository root: `MeetingRecorder.ahk` (app and help
   topics), `Backend.ps1` (dependency bootstrap, compile, recovery),
-  `Capture.cs` (capture engine). Tools live in `tools/`.
+  `Capture.cs` (capture engine), `Transcribe.py` (WhisperX transcription,
+  run by the portable Python it finds). Tools live in `tools/`.
   Generated files: `WhatsNew.generated.ahk`. Never edit generated files directly.
 - Build with: nothing to build. `Backend.ps1` compiles `Capture.cs` in memory
   at each launch. The test suite checks that the AHK script loads.
@@ -311,8 +312,12 @@ accessibility and management by exception:
 
 6. AutoHotkey v2 syntax only. Windows PowerShell 5.1 and .NET Framework 4.8
    for `Backend.ps1` and `Capture.cs` (C# 5, no newer language features).
-7. The one existing runtime dependency is NAudio.Core and NAudio.Wasapi
-   2.2.1, downloaded from NuGet and checked against NuGet's SHA-512.
+7. Runtime dependencies: NAudio.Core and NAudio.Wasapi 2.2.1, downloaded
+   from NuGet and checked against NuGet's SHA-512. For transcription (#7),
+   WhisperX 3.8.6 in a portable Python 3.11 plus FFmpeg 7.1 shared DLLs
+   (torchcodec loads them from its own folder), installed on demand by
+   `Backend.ps1 -Mode Transcriber`. `Transcribe.py` reads the WAV itself, so
+   WhisperX never needs `ffmpeg.exe`.
 8. Keep `MeetingRecorder.ahk` and `Backend.ps1` UTF-8 with BOM.
 
 ## Behavior and data
@@ -320,7 +325,7 @@ accessibility and management by exception:
 - Default shortcut `^!r` (Ctrl+Alt+R) toggles recording. Configurable.
 - Settings: `%LOCALAPPDATA%\MeetingRecorder\settings.ini`.
   `[Settings]` `Folder`, `Shortcut`, `Latest` (last saved file),
-  `CloudNotice` (1 after the Word upload notice), `Detect` (offer to record
+  `CloudNotice` (obsolete, from the removed Word handoff; ignored), `Detect` (offer to record
   Teams calls, default 1), `Calendar` (name files after the classic Outlook
   meeting, default 1); `[UI]` `X`, `Y` (panel).
   Missing keys fall back to defaults; add new keys the same way.
@@ -328,6 +333,12 @@ accessibility and management by exception:
   (`[Capture]` `State`, `Detail`; replaced atomically, UTF-16) and
   `stop.signal` (its presence asks the helper to stop).
 - Dependencies: `%LOCALAPPDATA%\MeetingRecorder\backend-2.2.1`.
+- Transcription: `FindTranscriber()` uses `%LOCALAPPDATA%\MeetingRecorder\transcriber`,
+  else PodcastClipper's `%LOCALAPPDATA%\PodcastEditorTools\whisperx-python`.
+  `Transcribe.py` reports in `transcribe.ini` (`[Transcribe]` `State`,
+  `Percent`, `Detail`; UTF-16) and writes `transcribe.tsv`; the app turns that
+  into `<recording>.txt` and `.srt` next to the WAV (left = Others,
+  right = Me). Transcripts may be rewritten; recordings never.
 - Teams calls: `DetectCall()` runs every 2 s. A call is active when Windows'
   microphone ConsentStore shows Teams with `LastUsedTimeStop = 0`. It only
   offers to record. Meeting names come from classic Outlook via

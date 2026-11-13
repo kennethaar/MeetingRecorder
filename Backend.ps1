@@ -1,4 +1,4 @@
-﻿param([ValidateSet('Setup','Record','Recover')][string]$Mode='Setup',[string]$Output,[string]$Status,[string]$Stop,[int]$ParentId)
+﻿param([ValidateSet('Setup','Record','Recover','Transcriber')][string]$Mode='Setup',[string]$Output,[string]$Status,[string]$Stop,[int]$ParentId)
 $ErrorActionPreference='Stop'
 $runtime=Join-Path $env:LOCALAPPDATA 'MeetingRecorder'
 $deps=Join-Path $runtime 'backend-2.2.1'
@@ -25,6 +25,40 @@ try {
  }
  [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
  Add-Type -AssemblyName System.IO.Compression.FileSystem
+ if($Mode -eq 'Transcriber') {
+  # One-time portable WhisperX for transcription on this PC (#7), the same steps as PodcastClipper:
+  # embeddable Python with site enabled, pip, WhisperX, and FFmpeg 7.1 DLLs that torchcodec loads
+  # from its own folder. Built in a .partial folder so the app never finds half an install.
+  $ProgressPreference='SilentlyContinue'
+  $target=Join-Path $runtime 'transcriber';$work="$target.partial";$log=Join-Path $runtime 'transcriber-setup.log'
+  if(Test-Path $work){Remove-Item -Recurse -Force $work}
+  New-Item -ItemType Directory -Force $work | Out-Null
+  function Get-Archive($uri,$detail,$dest) {
+   Set-State 'Installing' $detail
+   $zip="$dest.zip"
+   Invoke-WebRequest -UseBasicParsing -Uri $uri -OutFile $zip -TimeoutSec 1800
+   [IO.Compression.ZipFile]::ExtractToDirectory($zip,$dest);Remove-Item $zip
+  }
+  function Invoke-Python($arguments,$detail) {
+   Set-State 'Installing' $detail
+   $p=Start-Process (Join-Path $work 'python.exe') -ArgumentList $arguments -WorkingDirectory $work -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+   if($p.ExitCode -ne 0){throw "$detail failed. Details: $log.err"}
+  }
+  Get-Archive 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip' 'Downloading Python' $work
+  $pth=Get-ChildItem $work -Filter 'python3*._pth' | Select-Object -First 1
+  [IO.File]::WriteAllText($pth.FullName,([IO.File]::ReadAllText($pth.FullName) -replace '(?m)^#\s*import site','import site'))
+  Invoke-WebRequest -UseBasicParsing -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile (Join-Path $work 'get-pip.py') -TimeoutSec 300
+  Invoke-Python 'get-pip.py --no-warn-script-location' 'Installing pip'
+  Invoke-Python '-m pip install --no-warn-script-location whisperx==3.8.6' 'Downloading WhisperX. This takes several minutes'
+  Get-Archive 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip' 'Downloading FFmpeg libraries' (Join-Path $work 'ffmpeg')
+  $torchcodec=Join-Path $work 'Lib\site-packages\torchcodec'
+  if(!(Test-Path (Join-Path $work 'Lib\site-packages\whisperx')) -or !(Test-Path $torchcodec)){throw "WhisperX did not install. Details: $log"}
+  Get-ChildItem (Join-Path $work 'ffmpeg') -Recurse -Filter '*.dll' | ForEach-Object {Copy-Item $_.FullName $torchcodec -Force}
+  if(Test-Path $target){Remove-Item -Recurse -Force $target}
+  Move-Item $work $target
+  Set-State 'Ready' 'Transcriber ready'
+  exit 0
+ }
  foreach($id in @('naudio.core','naudio.wasapi')) {
   $dll=Join-Path $deps (($id -replace '^naudio','NAudio')+'.dll')
   if(!(Test-Path $dll)) {

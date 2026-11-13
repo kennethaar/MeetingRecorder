@@ -1,8 +1,15 @@
 # Changelog
 
+## 0.3.0 - 2026-11-13
+
+- Transcribe a recording: Click Transcribe when a recording is saved to get it
+  as text, made on this PC with WhisperX instead of in Word. Nothing is
+  uploaded. Lines are marked Others and Me, and a subtitle file is saved too
+  (#7).
+
 ## 0.2.1 - 2026-11-13
 
-- Open in Word: The question about uploading to OneDrive now shows on top of
+- Transcribe a recording: The question about uploading to OneDrive now shows on top of
   the Recording saved window, instead of hidden behind it (#6).
 
 ## 0.2.0 - 2026-11-12
@@ -28,7 +35,7 @@
   the left and your microphone on the right (#1).
 - Settings: Choose the recording folder and the keys that start and stop a
   recording (#1).
-- Open in Word: Send a saved recording to Word Transcribe to get it as text
+- Transcribe a recording: Send a saved recording to Word Transcribe to get it as text
   (#1).
 - Recovered recordings: Audio from a recording that was cut off is rescued the
   next time the app starts (#1).
