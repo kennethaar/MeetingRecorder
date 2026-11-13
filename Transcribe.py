@@ -23,8 +23,11 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 SAMPLE_RATE = 16000
 
 
-def set_state(path, state, percent, detail):
-    text = "[Transcribe]\r\nState=%s\r\nPercent=%d\r\nDetail=%s\r\n" % (state, percent, " ".join(str(detail).split()))
+def set_state(path, state, percent, detail, step=0, resumed=False):
+    """Step (#12): 1 load the speech model, 2 find where people speak, 3 write down what others
+    said, 4 write down what you said. Resumed=1 when what others said was saved by an earlier try."""
+    text = "[Transcribe]\r\nState=%s\r\nPercent=%d\r\nDetail=%s\r\nStep=%d\r\nResumed=%d\r\n" % (
+        state, percent, " ".join(str(detail).split()), step, 1 if resumed else 0)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-16", newline="") as f:
         f.write(text)
@@ -85,6 +88,38 @@ def language_sample(left, right):
     return mix[start : start + 30 * SAMPLE_RATE]
 
 
+def part_paths(wav, out, model_name):
+    """Where each finished part is kept until the transcript is done (#12). The name depends on
+    the recording, its size and time, and the model, so a part never belongs to another file."""
+    import hashlib
+
+    st = os.stat(wav)
+    key = "%s|%d|%d|%s" % (os.path.abspath(wav).lower(), st.st_size, int(st.st_mtime), model_name)
+    name = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    folder = os.path.join(os.path.dirname(os.path.abspath(out)), "parts")
+    return {speaker: os.path.join(folder, "%s.%s.tsv" % (name, speaker)) for speaker in ("Others", "Me")}
+
+
+def read_part(path):
+    """(language, rows) of a saved part, or None when there is none."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().split("\n")
+    except OSError:
+        return None
+    if not lines or not lines[0].startswith("# language="):
+        return None
+    return lines[0][len("# language="):], [line for line in lines[1:] if line]
+
+
+def write_part(path, language, rows):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write("# language=%s\n" % language + "".join(row + "\n" for row in rows))
+    os.replace(tmp, path)
+
+
 def main(wav, status, out, hint="", model_name="large-v3"):
     log = open(status + ".log", "w", encoding="utf-8", buffering=1)
     sys.stdout = sys.stderr = log
@@ -94,7 +129,13 @@ def main(wav, status, out, hint="", model_name="large-v3"):
         ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x4000)
     except Exception:
         pass
-    set_state(status, "Working", 0, "Loading the speech model")
+    # Each finished part is saved, so a new try picks up where the last one stopped (#12).
+    parts = part_paths(wav, out, model_name)
+    saved = {speaker: read_part(path) for speaker, path in parts.items()}
+    resumed = saved["Others"] is not None
+    if resumed:
+        print("Picking up where it stopped: what others said was saved by an earlier try")
+    set_state(status, "Working", 0, "Loading the speech model", 1, resumed)
     import torch
     import whisperx
 
@@ -103,50 +144,68 @@ def main(wav, status, out, hint="", model_name="large-v3"):
     threads = max(1, (os.cpu_count() or 2) // 2)
     torch.set_num_threads(threads)
     print("Threads: %d" % threads)
-    left, right = read_channels(wav)
     print("Hint:", hint)
-    model = whisperx.load_model(
-        model_name, "cpu", compute_type="int8", threads=threads, asr_options={"initial_prompt": hint.strip() or None}
-    )
-    language = model.detect_language(language_sample(left, right))
+    language = next((part[0] for part in saved.values() if part), None)
+    model = align_model = align_meta = left = right = None
+    if None in saved.values():
+        left, right = read_channels(wav)
+        model = whisperx.load_model(
+            model_name, "cpu", compute_type="int8", threads=threads, asr_options={"initial_prompt": hint.strip() or None}
+        )
+        if language is None:
+            language = model.detect_language(language_sample(left, right))
+        try:
+            align_model, align_meta = whisperx.load_align_model(language_code=language, device="cpu")
+        except Exception as e:  # no alignment model for this language, or offline: keep WhisperX's own times
+            print("Alignment skipped:", e)
+            align_model = align_meta = None
     print("Language:", language)
-    set_state(status, "Working", 10, "Loading the speech model")
-    try:
-        align_model, align_meta = whisperx.load_align_model(language_code=language, device="cpu")
-    except Exception as e:  # no alignment model for this language, or offline: keep WhisperX's own times
-        print("Alignment skipped:", e)
-        align_model = align_meta = None
 
     rows = []
-    for index, (speaker, audio, label) in enumerate(
-        [("Others", left, "Writing down what others said"), ("Me", right, "Writing down what you said")]
-    ):
-        base = 10 + index * 45
+    for index, (speaker, label) in enumerate([("Others", "Writing down what others said"), ("Me", "Writing down what you said")]):
+        if saved[speaker] is not None:
+            rows += saved[speaker][1]
+            continue
+        audio = left if index == 0 else right
+        base, step = 10 + index * 45, 3 + index
+        # Finding where people speak comes before the first progress; for Me it is part of step 4.
+        if index == 0:
+            set_state(status, "Working", base, "Finding where people speak", 2, resumed)
+        else:
+            set_state(status, "Working", base, label, step, resumed)
 
-        def progress(pct, base=base, label=label, share=36):
-            set_state(status, "Working", base + pct * share / 100, label)
+        def progress(pct, base=base, label=label, step=step):
+            set_state(status, "Working", base + pct * 36 / 100, label, step, resumed)
 
-        progress(0)
         result = model.transcribe(audio, batch_size=8, language=language, progress_callback=progress)
         segments = result["segments"]
         if segments and align_model is not None:
             try:
                 segments = whisperx.align(
                     segments, align_model, align_meta, audio, "cpu",
-                    progress_callback=lambda pct, base=base, label=label: set_state(status, "Working", base + 36 + pct * 9 / 100, label),
+                    progress_callback=lambda pct, base=base, label=label, step=step: set_state(
+                        status, "Working", base + 36 + pct * 9 / 100, label, step, resumed),
                 )["segments"]
             except Exception as e:
                 print("Alignment failed for", speaker, ":", e)
+        part = []
         for s in segments:
             text = " ".join(str(s.get("text", "")).split())
             if text and s.get("start") is not None and s.get("end") is not None:
-                rows.append("%.3f\t%.3f\t%s\t%s" % (s["start"], s["end"], speaker, text))
+                part.append("%.3f\t%.3f\t%s\t%s" % (s["start"], s["end"], speaker, text))
+        write_part(parts[speaker], language, part)
+        rows += part
 
     tmp = out + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(rows) + ("\n" if rows else ""))
     os.replace(tmp, out)
-    set_state(status, "Done", 100, "Transcript ready")
+    for path in parts.values():
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    set_state(status, "Done", 100, "Transcript ready", 4, resumed)
 
 
 if __name__ == "__main__":

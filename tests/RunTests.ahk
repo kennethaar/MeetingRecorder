@@ -29,7 +29,8 @@ Tests := [
     ["Meeting title and attendees become the transcript hint (#10)", TestMeetingHint],
     ["WhisperX is found in this app's or PodcastClipper's install (#7)", TestFindTranscriber],
     ["Transcribing goes on while the app reads its progress (#7)", TestStatusWhileRead],
-    ["A recording is transcribed on this PC into Others and Me (#7)", TestTranscribeSpeech],
+    ["A recording is transcribed on this PC into Others and Me, and picks up where it stopped (#7, #12)", TestTranscribeSpeech],
+    ["Transcribing shows its steps, a moving bar while getting ready, and a ring on the tray icon (#12)", TestTranscribeProgress],
     ["Recording saved window says what is new and offers to transcribe again (#8)", TestNoticeView],
     ["Tray menu shows transcribing, recordings, Help and About (#8)", TestTrayMenu],
     ["Tray menu › Recordings lists the newest recordings to open (#11)", TestRecentRecordings],
@@ -439,8 +440,29 @@ TestTranscribeSpeech() {
         RunWait(PowerShell() " -File " Q(Root "\tests\Make-SpeechWav.ps1") " -Output " Q(wav)
             . ' -Others "Good morning everyone. Shall we look at the budget with Kenneth Aar?" -Me "Yes. Let us begin with the numbers."', , "Hide")
         Check(FileExist(wav), "Test speech was not generated")
+        ; #12: stopped while writing down what you said, a new try keeps what others said and picks
+        ; up there. The steps are reported as they go, so the app can say what it is doing.
+        cmd := TranscribeCommand(py, Root, wav, status, segments, "Budget. Kenneth Aar.")
+        Run(cmd, , "Hide", &pid)
+        seen := Map(), start := A_TickCount
+        while ProcessExist(pid) && A_TickCount - start < 600000 {
+            step := IniRead(status, "Transcribe", "Step", "")
+            seen[step] := true
+            if step = "4" {
+                ProcessClose(pid)
+                break
+            }
+            Sleep(50)
+        }
+        Check(seen.Has("4"), "The transcriber never reached step 4 (writing down what you said); steps seen: " MapKeys(seen))
+        Check(seen.Has("1") || seen.Has("2"), "Getting ready was not reported as step 1 or 2; steps seen: " MapKeys(seen))
+        ProcessWaitClose(pid, 10)
         ; #10: the meeting hint makes the speech model spell the name right.
-        RunWait(TranscribeCommand(py, Root, wav, status, segments, "Budget. Kenneth Aar."), , "Hide")
+        RunWait(cmd, , "Hide")
+        log := FileRead(status ".log", "UTF-8")
+        Check(InStr(log, "Picking up where it stopped"), "The second try did not pick up where the first stopped:`n" SubStr(log, 1, 1500))
+        Check(IniRead(status, "Transcribe", "Resumed", "") = "1", "The status does not say it picked up where it stopped")
+        Check(!DirExist(tmp "\parts") || !FileExist(tmp "\parts\*"), "Saved parts were left behind after the transcript was done")
         state := IniRead(status, "Transcribe", "State", "(no status)")
         Check(state = "Done", "Transcriber ended in " state ": " IniRead(status, "Transcribe", "Detail", "") "`n" (FileExist(status ".log") ? SubStr(FileRead(status ".log"), -1500) : ""))
         WriteTranscript(wav, segments)
@@ -553,6 +575,73 @@ TestRecentRecordings() {
         try DirDelete(dir, true)
 }
 
+; #12: transcribing sat at 0% for minutes with no sign of what it was doing. The window lists the
+; steps, ticks off the finished ones and shows the one now in bold, with a moving bar while it
+; gets ready. The tray icon has a ring that fills (or spins while getting ready).
+TestTranscribeProgress() {
+    names := ["Load the speech model", "Find where people speak", "Write down what others said", "Write down what you said"]
+    n := MakeNotice("C:\Rec\2026-11-13 095900 - Market Demo MEPS - 1A2B3C4D.wav", "Saved", "")
+    try {
+        cases := [[1, false, 0, ["●", "○", "○", "○"], true], [2, false, 10, ["✓", "●", "○", "○"], true]
+            , [3, false, 40, ["✓", "✓", "●", "○"], false], [4, true, 72, ["✓", "✓", "✓", "●"], false]]
+        for c in cases {
+            ShowSteps(n, c[1], c[2], c[3])
+            for name in names {
+                want := c[4][A_Index] " " name (c[2] && A_Index = 3 ? " (saved earlier)" : "")
+                got := n["Step" A_Index]
+                Check(got.Visible && got.Text = want, Format("Step {}: line {} was '{}', not '{}'", c[1], A_Index, got.Text, want))
+                Check((FontWeight(got) >= 600) = (A_Index = c[1]), Format("Step {}: only the step now must be bold, line {} weight {}", c[1], A_Index, FontWeight(got)))
+            }
+            bar := n["TranscribeProgress"]
+            marquee := !!(ControlGetStyle(bar) & 0x8)
+            Check(marquee = c[5], Format("Step {}: the bar must {}move by itself", c[1], c[5] ? "" : "not "))
+            if !c[5]
+                Check(bar.Value = c[3], Format("Step {}: the bar shows {}, not {}%", c[1], bar.Value, c[3]))
+        }
+    } finally
+        n.Destroy()
+
+    Check(TrayStatusText("Working", 0, 1) = "Transcribing: getting ready...", "Tray menu while loading: " TrayStatusText("Working", 0, 1))
+    Check(TrayStatusText("Working", 10, 2) = "Transcribing: getting ready...", "Tray menu while finding speech: " TrayStatusText("Working", 10, 2))
+    Check(TrayStatusText("Working", 42, 4) = "Transcribing: 42% done", "Tray menu while writing: " TrayStatusText("Working", 42, 4))
+    Check(TranscribeTip(0, 1, "Loading the speech model") = "Transcribing: getting ready, loading the speech model", "Tooltip while loading: " TranscribeTip(0, 1, "Loading the speech model"))
+    Check(TranscribeTip(42.4, 4, "Writing down what you said") = "Transcribing: 42%, writing down what you said", "Tooltip while writing: " TranscribeTip(42.4, 4, "Writing down what you said"))
+
+    ; The ring on the icon, read from its pixels: white where it has filled, grey where it has not.
+    s := 32, right := [27, 16], left := [5, 16], bottomRight := [24, 24], topLeft := [8, 8]
+    for c in [[0, -1, [right, left], []], [50, -1, [left], [right]], [100, -1, [], [right, left]], [0, 0, [topLeft], [bottomRight]]] {
+        bmp := RingBitmap(s, c[1], c[2])
+        try {
+            for p in c[3]
+                Check(PixelIs(bmp, p, "grey"), Format("{}% spin {}: ring at {},{} must be unfilled, was {:08X}", c[1], c[2], p[1], p[2], Pixel(bmp, p)))
+            for p in c[4]
+                Check(PixelIs(bmp, p, "white"), Format("{}% spin {}: ring at {},{} must be filled, was {:08X}", c[1], c[2], p[1], p[2], Pixel(bmp, p)))
+            Check(PixelIs(bmp, [16, 16], "red"), Format("The red dot is gone at {}%, centre was {:08X}", c[1], Pixel(bmp, [16, 16])))
+        } finally
+            DllCall("gdiplus\GdipDisposeImage", "Ptr", bmp)
+    }
+    h := TrayRingIcon(42)
+    Check(h, "No tray icon was made")
+    DllCall("DestroyIcon", "Ptr", h)
+}
+Pixel(bmp, p) {
+    DllCall("gdiplus\GdipBitmapGetPixel", "Ptr", bmp, "Int", p[1], "Int", p[2], "UInt*", &argb := 0)
+    return argb
+}
+PixelIs(bmp, p, kind) {
+    argb := Pixel(bmp, p), r := (argb >> 16) & 255, g := (argb >> 8) & 255, b := argb & 255
+    if kind = "white"
+        return r > 200 && g > 200 && b > 200
+    if kind = "red"
+        return r > 180 && g < 120 && b < 120
+    return r < 140 && g < 140 && b < 140 && Abs(r - b) < 40
+}
+FontWeight(c) {
+    lf := Buffer(92, 0)
+    DllCall("GetObjectW", "Ptr", SendMessage(0x31, 0, 0, c), "Int", 92, "Ptr", lf)
+    return NumGet(lf, 16, "Int")
+}
+
 ; #8: Help opens a topic from the tray menu; About says which version this is.
 TestHelpAndAbout() {
     topic := {title: "Demo", what: "What it is.", steps: ["Do this.", "Then that."], keys: [["Ctrl + Alt + R", "Start or stop."]], legend: [], more: "Extra detail."}
@@ -600,8 +689,9 @@ TestWindowLayout() {
     windows.Push(["Panel offering a call", p])
     windows.Push(["Recording saved", MakeNotice(wav, "Saved", "")])
     n := MakeNotice(wav, "Incomplete", "The microphone stopped working.")
-    n["TranscribeStatus"].Text := "Loading the speech model...  12 min. Click Hide to keep working."
-    n["TranscribeStatus"].Visible := true, n["TranscribeProgress"].Visible := true, n["Again"].Visible := true
+    ShowSteps(n, 4, true, 72)
+    n["TranscribeStatus"].Text := "12 min so far. Click Hide to keep working."
+    n["TranscribeStatus"].Visible := true, n["Again"].Visible := true
     n["Transcribe"].Text := "Open transcript"
     LayoutNotice(n)
     windows.Push(["Recording saved while transcribing", n])
@@ -737,6 +827,12 @@ MenuLabels(hMenu) {
         labels.Push(StrGet(buf))
     }
     return labels
+}
+MapKeys(m) {
+    s := ""
+    for k in m
+        s .= (s = "" ? "" : ", ") (k = "" ? "(none)" : k)
+    return s
 }
 Join(list) {
     s := ""

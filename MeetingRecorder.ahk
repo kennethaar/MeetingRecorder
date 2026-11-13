@@ -3,7 +3,7 @@
 Persistent
 ; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
 TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
-AppVersion := "0.6.1"
+AppVersion := "0.7.0"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -29,6 +29,7 @@ CompletionWav := ""    ; the recording the Recording saved window is about
 CompletionKind := ""   ; "Saved" or "Incomplete"
 ; Transcription on this PC (#7). TxState: "", "Installing", "Working", "Error".
 TxState := "", TxWav := "", TxPid := 0, TxStart := 0, TxPercent := 0, TxDetail := ""
+TxStep := 0, TxResumed := false   ; step 1-4 and whether an earlier try's part was kept (#12)
 TxStatusPath := AppDir "\transcribe.ini"
 TxSegmentsPath := AppDir "\transcribe.tsv"
 TxSetupPath := AppDir "\transcriber-setup.ini"
@@ -179,7 +180,7 @@ StopRecording(*) {
  ShowState()
 }
 Poll() {
- global State, Child, StatusPath, StartTick, Action, Latest, Config, Closing, CallEnded, TxState, TxPercent
+ global State, Child, StatusPath, StartTick, Action, Latest, Config, Closing, CallEnded, TxState, TxPercent, TxStep, TxDetail
  if FileExist(StatusPath) {
   s := IniRead(StatusPath,"Capture","State","")
   detail := IniRead(StatusPath,"Capture","Detail","")
@@ -214,7 +215,7 @@ Poll() {
   elapsed := Format("{:02}:{:02}:{:02}",seconds//3600,Mod(seconds//60,60),Mod(seconds,60))
   SetStatus("Recording  " elapsed, CallEnded ? "The Teams call ended. Stop to save." : "Stop: " ShortcutText())
   A_IconTip := "Meeting Recorder`nRecording: " elapsed
- } else A_IconTip := "Meeting Recorder`n" State (TxState = "Working" ? "`nTranscribing " TxPercent "%" : "")
+ } else A_IconTip := "Meeting Recorder`n" State (TxState = "Working" ? "`n" TranscribeTip(TxPercent, TxStep, TxDetail) : "")
  if Child && !ProcessExist(Child) {
   Child := 0
   if State = "Recording" || State = "Starting" || State = "Saving" || State = "Installing" {
@@ -263,8 +264,10 @@ MakeNotice(wav,kind,note) {
  g.SetFont("s9 c595959")
  g.AddText("vWhen w480" (when = "" ? " Hidden" : ""),when)
  g.SetFont("s10 cDefault")
- g.AddText("vTranscribeStatus w480 Hidden")
+ loop 4
+  g.AddText("vStep" A_Index " w480 Hidden")
  g.AddProgress("vTranscribeProgress w480 h8 Hidden")
+ g.AddText("vTranscribeStatus w480 Hidden")
  g.AddButton("vTranscribe w130 Default","Transcribe")
  g.AddButton("vShowFile x+8 w100","Show file")
  g.AddButton("vAgain x+8 w130 Hidden","Transcribe again")
@@ -276,14 +279,18 @@ MakeNotice(wav,kind,note) {
 LayoutNotice(g) {
  g["Heading"].GetPos(,&y,,&h)
  y += h
- for row in [["FileName",6],["When",2],["TranscribeStatus",12],["TranscribeProgress",6]] {
+ started := false   ; the transcribing rows start 12 px below the recording's name and time
+ for row in [["FileName",6],["When",2],["Step1",2],["Step2",2],["Step3",2],["Step4",2],["TranscribeProgress",8],["TranscribeStatus",6]] {
   c := g[row[1]]
   if !c.Visible
    continue
+  gap := row[2]
+  if !started && row[1] != "FileName" && row[1] != "When"
+   gap := 12, started := true
   if c.Type = "Text"
    FitHeight(c)
   c.GetPos(,,,&h)
-  c.Move(,y += row[2])
+  c.Move(,y += gap)
   y += h
  }
  y += 16
@@ -446,12 +453,115 @@ BuildTrayMenu(m) {
  m.Add("Exit",Quit)
 }
 ; The top line of the tray menu while transcribing; "" when there is nothing to show.
-TrayStatusText(state,percent) {
+; Steps 1 and 2 have no percent yet, so they say getting ready instead of 0% (#12).
+TrayStatusText(state,percent,step:=3) {
  if state = "Installing"
   return "Getting the transcriber ready..."
  if state = "Working"
-  return "Transcribing: " percent "% done"
+  return step <= 2 ? "Transcribing: getting ready..." : "Transcribing: " percent "% done"
  return ""
+}
+; The tray icon's tooltip line while transcribing: how far, and what it is doing (#12).
+TranscribeTip(percent,step,detail) {
+ doing := StrLower(SubStr(detail,1,1)) SubStr(detail,2)
+ return "Transcribing: " (step <= 2 ? "getting ready" : Round(IsNumber(percent) ? percent : 0) "%") (doing = "" ? "" : ", " doing)
+}
+; The Recording saved window while transcribing: the steps, the finished ones ticked and the one
+; now in bold, and a bar that moves by itself until there is a percent to show (#12).
+ShowSteps(g,step,resumed,percent) {
+ names := ["Load the speech model","Find where people speak","Write down what others said","Write down what you said"]
+ loop 4 {
+  c := g["Step" A_Index]
+  done := A_Index < step || (resumed && A_Index = 3)
+  c.Text := (A_Index = step ? "●" : done ? "✓" : "○") " " names[A_Index] (resumed && A_Index = 3 ? " (saved earlier)" : "")
+  c.SetFont(A_Index = step ? "w600" : "w400")
+  c.Visible := true
+ }
+ bar := g["TranscribeProgress"]
+ SetMarquee(bar, step <= 2)
+ if step > 2
+  bar.Value := percent
+ bar.Visible := true
+}
+SetMarquee(bar,on) {
+ if on = !!(ControlGetStyle(bar) & 0x8)
+  return
+ if on {
+  bar.Opt("+0x8")
+  SendMessage(0x40A,1,30,bar)   ; PBM_SETMARQUEE
+ } else {
+  SendMessage(0x40A,0,0,bar)
+  bar.Opt("-0x8")
+ }
+}
+; The tray icon while transcribing: a ring round the red dot that fills as it goes, or an arc
+; that spins round it while getting ready (#12). Back to the plain icon when done.
+UpdateTrayIcon() {
+ global TxState, TxStep, TxPercent
+ static shown := ""
+ want := TxState = "Working" && TxStep > 2 ? "ring " Round(IsNumber(TxPercent) ? TxPercent : 0)
+  : TxState = "Working" || TxState = "Installing" ? "spin" : ""
+ if want = shown
+  return
+ shown := want
+ SetTimer(SpinTray, want = "spin" ? 120 : 0)
+ if want = "spin"
+  SpinTray()
+ else SetTrayIcon(want = "" ? 0 : TrayRingIcon(TxPercent))
+}
+SpinTray() {
+ static angle := 0
+ angle := Mod(angle + 30, 360)
+ SetTrayIcon(TrayRingIcon(0, angle))
+}
+SetTrayIcon(h) {
+ static last := 0
+ TraySetIcon(h ? "HICON:*" h : A_ScriptDir "\MeetingRecorder.ico")
+ if last
+  DllCall("DestroyIcon","Ptr",last)
+ last := h
+}
+TrayRingIcon(percent,spin:=-1) {
+ bmp := RingBitmap(DllCall("GetSystemMetrics","Int",49), IsNumber(percent) ? percent : 0, spin)
+ DllCall("gdiplus\GdipCreateHICONFromBitmap","Ptr",bmp,"Ptr*",&h:=0)
+ DllCall("gdiplus\GdipDisposeImage","Ptr",bmp)
+ return h
+}
+; The app icon (dark circle, red dot) with a grey ring that turns white as it fills to percent,
+; or, with spin 0-359, a white quarter arc starting at that angle. Returns a GDI+ bitmap.
+RingBitmap(size,percent,spin:=-1) {
+ StartGdiplus()
+ DllCall("gdiplus\GdipCreateBitmapFromScan0","Int",size,"Int",size,"Int",0,"Int",0x26200A,"Ptr",0,"Ptr*",&bmp:=0)
+ DllCall("gdiplus\GdipGetImageGraphicsContext","Ptr",bmp,"Ptr*",&g:=0)
+ DllCall("gdiplus\GdipSetSmoothingMode","Ptr",g,"Int",4)
+ DllCall("gdiplus\GdipCreateSolidFill","UInt",0xFF1F2937,"Ptr*",&brush:=0)
+ edge := Max(0.5,size/64)
+ DllCall("gdiplus\GdipFillEllipse","Ptr",g,"Ptr",brush,"Float",edge,"Float",edge,"Float",size-2*edge,"Float",size-2*edge)
+ width := Max(2,size/8), inset := size*0.17, d := size-2*inset
+ DllCall("gdiplus\GdipCreatePen1","UInt",0xFF6B7280,"Float",width,"Int",2,"Ptr*",&pen:=0)
+ DllCall("gdiplus\GdipDrawEllipse","Ptr",g,"Ptr",pen,"Float",inset,"Float",inset,"Float",d,"Float",d)
+ sweep := spin >= 0 ? 90 : 360*Min(Max(percent,0),100)/100
+ if sweep > 0 {
+  DllCall("gdiplus\GdipSetPenColor","Ptr",pen,"UInt",0xFFFFFFFF)
+  DllCall("gdiplus\GdipDrawArc","Ptr",g,"Ptr",pen,"Float",inset,"Float",inset,"Float",d,"Float",d,"Float",spin >= 0 ? spin : -90,"Float",sweep)
+ }
+ DllCall("gdiplus\GdipSetSolidFillColor","Ptr",brush,"UInt",0xFFEF4444)
+ dot := size*0.33
+ DllCall("gdiplus\GdipFillEllipse","Ptr",g,"Ptr",brush,"Float",dot,"Float",dot,"Float",size-2*dot,"Float",size-2*dot)
+ DllCall("gdiplus\GdipDeletePen","Ptr",pen)
+ DllCall("gdiplus\GdipDeleteBrush","Ptr",brush)
+ DllCall("gdiplus\GdipDeleteGraphics","Ptr",g)
+ return bmp
+}
+StartGdiplus() {
+ static token := 0
+ if !token {
+  DllCall("LoadLibrary","Str","gdiplus","Ptr")
+  si := Buffer(24,0)
+  NumPut("UInt",1,si)
+  DllCall("gdiplus\GdiplusStartup","Ptr*",&token,"Ptr",si,"Ptr",0)
+ }
+ return token
 }
 ; Adds, renames or removes the status line (and its separator) at the top of menu m.
 SetTrayStatus(m,text) {
@@ -681,10 +791,10 @@ StartTranscribe(wav) {
   return
  for path in [TxStatusPath, TxSegmentsPath, TxSetupPath]
   try FileDelete(path)
- TxWav := wav, TxStart := A_TickCount, TxPercent := 0
+ TxWav := wav, TxStart := A_TickCount, TxPercent := 0, TxStep := 1, TxResumed := false
  try {
   if py = "" {
-   TxState := "Installing", TxDetail := "Getting the transcriber ready"
+   TxState := "Installing", TxDetail := "Getting the transcriber ready", TxStep := 0
    Run(PSCommand("Transcriber") " -Status " Q(TxSetupPath),, "Hide", &TxPid)
   } else {
    TxState := "Working", TxDetail := "Loading the speech model"
@@ -698,7 +808,7 @@ StartTranscribe(wav) {
  ShowTranscribeState()
 }
 TranscribePoll() {
- global TxState, TxWav, TxPid, TxPercent, TxDetail, TxStatusPath, TxSegmentsPath, TxSetupPath
+ global TxState, TxWav, TxPid, TxPercent, TxDetail, TxStatusPath, TxSegmentsPath, TxSetupPath, TxStep, TxResumed
  alive := TxPid && ProcessExist(TxPid)   ; checked before the status, so a final status is never missed
  if TxState = "Installing" {
   s := IniRead(TxSetupPath,"Capture","State","")
@@ -711,6 +821,9 @@ TranscribePoll() {
   s := IniRead(TxStatusPath,"Transcribe","State","")
   TxPercent := IniRead(TxStatusPath,"Transcribe","Percent",TxPercent)
   TxDetail := IniRead(TxStatusPath,"Transcribe","Detail",TxDetail)
+  step := IniRead(TxStatusPath,"Transcribe","Step","")
+  TxStep := IsInteger(step) && step >= 1 ? Integer(step) : TxStep
+  TxResumed := IniRead(TxStatusPath,"Transcribe","Resumed",TxResumed ? 1 : 0) = 1
   if s = "Done" {
    try {
     WriteTranscript(TxWav, TxSegmentsPath)
@@ -751,8 +864,10 @@ StopTranscriber() {
 ; Shows the transcription state in the tray menu, and in the Recording saved window for the
 ; recording it is about.
 ShowTranscribeState() {
- global Completion, CompletionKind, TxState, TxStart, TxPercent, TxDetail
- SetTrayStatus(A_TrayMenu, TrayStatusText(TxState, Round(IsNumber(TxPercent) ? TxPercent : 0)))
+ global Completion, CompletionKind, TxState, TxStart, TxPercent, TxDetail, TxStep, TxResumed
+ percent := Round(IsNumber(TxPercent) ? TxPercent : 0)
+ SetTrayStatus(A_TrayMenu, TrayStatusText(TxState, percent, TxStep))
+ UpdateTrayIcon()
  if !IsObject(Completion)
   return
  tx := NoticeTx()
@@ -761,13 +876,20 @@ ShowTranscribeState() {
  Completion["Transcribe"].Text := v.primary
  Completion["Again"].Visible := v.again
  status := Completion["TranscribeStatus"], bar := Completion["TranscribeProgress"]
- if tx = "busy" {
-  status.Text := TxDetail "...  " (A_TickCount - TxStart)//60000 " min. Click Hide to keep working."
-  bar.Value := TxPercent
- } else if tx = "failed"
+ busy := tx = "busy"
+ if busy && TxState = "Working"
+  ShowSteps(Completion, TxStep, TxResumed, percent)
+ else {
+  loop 4
+   Completion["Step" A_Index].Visible := false
+  SetMarquee(bar, busy)
+  bar.Visible := busy
+ }
+ if busy
+  status.Text := (TxState = "Installing" ? TxDetail "...  " : "") (A_TickCount - TxStart)//60000 " min so far. Click Hide to keep working."
+ else if tx = "failed"
   status.Text := TxDetail
- status.Visible := tx = "busy" || tx = "failed"
- bar.Visible := tx = "busy"
+ status.Visible := busy || tx = "failed"
  if LayoutNotice(Completion) && DllCall("IsWindowVisible","Ptr",Completion.Hwnd)
   Completion.Show("AutoSize NoActivate")
 }
@@ -1099,23 +1221,24 @@ HelpTopics() {
             what: "Turns a saved recording into text on this PC. Nothing is uploaded. Lines are marked Others or Me.",
             steps: [
                 "Click Transcribe when a recording is saved.",
-                "Click Hide to keep working. The tray icon shows how far it has come.",
+                "Click Hide to keep working. The tray icon's ring fills as it goes.",
                 "Click Open transcript when it is ready.",
-                "For an older recording, choose it under Recordings in the tray menu.",
+                "Older recordings are under Recordings in the tray menu.",
             ],
             keys: [],
             legend: [
                 ["Saved.Heading", "What is new"],
                 ["Saved.FileName", "The recording"],
-                ["?Saved.TranscribeStatus", "What it is doing"],
+                ["?Saved.Step1", "The steps"],
                 ["?Saved.TranscribeProgress", "Progress"],
+                ["?Saved.TranscribeStatus", "Time so far, or the error"],
                 ["Saved.Transcribe", "Transcribe, cancel, or open the transcript"],
                 ["Saved.ShowFile", "Show it in Explorer"],
                 ["?Saved.Again", "Make a new transcript"],
                 ["Saved.Hide", "Hide. Transcribing goes on."],
             ],
             view: "Saved",
-            more: "Others is what you heard. Me is your microphone. Transcribe again replaces the transcript you have. To get this window back, choose the recording under Recordings in the tray menu. The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. A pause of 2 seconds starts a new paragraph with its own time. If the recording is named after an Outlook meeting, its title and the names of the people invited help spell names right. They are kept in %LOCALAPPDATA%\MeetingRecorder\meetings.ini. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. A long meeting can take about as long to transcribe as it lasted. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
+            more: "Others is what you heard. Me is your microphone. Getting ready takes a few minutes, so the bar moves by itself until there is a percent. If transcribing stops, Try again picks up where it stopped: a finished part is kept. Transcribe again replaces the transcript you have. To get this window back, choose the recording under Recordings in the tray menu. The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. A pause of 2 seconds starts a new paragraph with its own time. If the recording is named after an Outlook meeting, its title and the names of the people invited help spell names right. They are kept in %LOCALAPPDATA%\MeetingRecorder\meetings.ini. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. A long meeting can take about as long to transcribe as it lasted. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
         },
         {
             id: "tray",

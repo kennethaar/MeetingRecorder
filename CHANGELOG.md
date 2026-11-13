@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0 - 2026-11-13
+
+- Transcribe a recording: If transcribing stops, Try again picks up where it
+  stopped. What others said is kept once it is done, so it is not done
+  twice (#12).
+- Transcribe a recording: The window lists the steps and ticks them off, and
+  the bar moves while it gets ready instead of sitting at 0% (#12).
+- Tray menu: A ring round the tray icon fills as transcribing goes on, and
+  spins while it gets ready. Hover to see the percent and the step (#12).
+
 ## 0.6.1 - 2026-11-13
 
 - Transcribe a recording: A long transcription no longer stops halfway with
