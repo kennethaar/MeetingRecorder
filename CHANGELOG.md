@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 - 2026-11-13
+
+- Transcribe a recording: A long transcription no longer stops halfway with
+  "Access denied" on transcribe.ini. That happened when the app checked the
+  progress just as the transcriber updated it (#7).
+
 ## 0.6.0 - 2026-11-13
 
 - Tray menu: Recordings lists your 8 newest recordings, so you can open an

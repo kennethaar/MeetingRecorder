@@ -28,7 +28,20 @@ def set_state(path, state, percent, detail):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-16", newline="") as f:
         f.write(text)
-    os.replace(tmp, path)
+    # The app reads the file every 200 ms, and Windows refuses to replace it during a read (#7).
+    # Wait for the read to end. A progress update that still cannot be written is skipped,
+    # so it never stops the transcription; Done and Error must get through.
+    import time
+    for attempt in range(100):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 99:
+                if state == "Working":
+                    return
+                raise
+            time.sleep(0.05)
 
 
 def read_channels(path):

@@ -28,6 +28,7 @@ Tests := [
     ["Transcript says who spoke when, as text and subtitles (#7)", TestTranscriptText],
     ["Meeting title and attendees become the transcript hint (#10)", TestMeetingHint],
     ["WhisperX is found in this app's or PodcastClipper's install (#7)", TestFindTranscriber],
+    ["Transcribing goes on while the app reads its progress (#7)", TestStatusWhileRead],
     ["A recording is transcribed on this PC into Others and Me (#7)", TestTranscribeSpeech],
     ["Recording saved window says what is new and offers to transcribe again (#8)", TestNoticeView],
     ["Tray menu shows transcribing, recordings, Help and About (#8)", TestTrayMenu],
@@ -392,6 +393,38 @@ TestFindTranscriber() {
 ; #7: end to end with the real WhisperX on this PC. Windows' voice speaks for Others on the left,
 ; then for Me on the right; the transcript next to the WAV must say who said what, in order.
 ; Uses the cached large-v3 model, so it takes a minute or two.
+; #7: transcribing failed at 72% with "[WinError 5] Access denied: ...transcribe.ini" because the
+; app was reading the status file just when the transcriber replaced it. The transcriber must wait
+; for the read to end instead of failing.
+TestStatusWhileRead() {
+    py := FindTranscriber(EnvGet("LOCALAPPDATA"))
+    if py = "" {
+        Out("      skipped: WhisperX is not installed on this PC")
+        return
+    }
+    tmp := A_Temp "\MeetingRecorder-test-" A_TickCount
+    DirCreate(tmp)
+    status := tmp "\transcribe.ini"
+    FileAppend("[Transcribe]`r`nState=Working`r`nPercent=70`r`n", status, "UTF-16")
+    ; Open the way the app's IniRead does: others may read and write, but not replace it.
+    h := DllCall("CreateFileW", "Str", status, "UInt", 0x80000000, "UInt", 0x3, "Ptr", 0, "UInt", 3, "UInt", 0x80, "Ptr", 0, "Ptr")
+    try {
+        Check(h != -1, "Could not open the status file for the test")
+        code := "import sys; sys.path.insert(0, sys.argv[1]); import Transcribe; Transcribe.set_state(sys.argv[2], 'Working', 72, 'Finding who said what')"
+        job := ComObject("WScript.Shell").Exec(Q(py) " -I -c " Q(code) " " Q(Root) " " Q(status))
+        Sleep(1500)
+        DllCall("CloseHandle", "Ptr", h), h := -1
+        start := A_TickCount
+        while !job.Status && A_TickCount - start < 15000
+            Sleep(100)
+        Check(job.Status && job.ExitCode = 0, "Writing the status while it was being read failed: " job.StdErr.ReadAll())
+        Check(IniRead(status, "Transcribe", "Percent", "") = "72", "The status was not updated after the read ended")
+    } finally {
+        if h != -1
+            DllCall("CloseHandle", "Ptr", h)
+        try DirDelete(tmp, true)
+    }
+}
 TestTranscribeSpeech() {
     py := FindTranscriber(EnvGet("LOCALAPPDATA"))
     if py = "" {
