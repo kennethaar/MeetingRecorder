@@ -25,6 +25,10 @@ Tests := [
     ["Transcript says who spoke when, as text and subtitles (#7)", TestTranscriptText],
     ["WhisperX is found in this app's or PodcastClipper's install (#7)", TestFindTranscriber],
     ["A recording is transcribed on this PC into Others and Me (#7)", TestTranscribeSpeech],
+    ["Recording saved window says what is new and offers to transcribe again (#8)", TestNoticeView],
+    ["Tray menu shows transcribing, recordings, Help and About (#8)", TestTrayMenu],
+    ["Help and About windows show the topic and the version (#8)", TestHelpAndAbout],
+    ["App icon is used on the tray, windows and toasts (#8)", TestAppIcon],
 ]
 Failures := 0, Ran := 0
 for t in Tests {
@@ -360,7 +364,119 @@ TestTranscribeSpeech() {
     }
 }
 
+; #8: the window came back as "Recording saved" when the news was the transcript. Its heading
+; says what is new now, and a finished transcript can be made again.
+TestNoticeView() {
+    cases := [
+        ["Saved", "", "Recording saved", "Transcribe", false],
+        ["Incomplete", "", "Recording saved, but incomplete", "Transcribe", false],
+        ["Saved", "busy", "Transcribing", "Cancel", false],
+        ["Saved", "ready", "Transcript ready", "Open transcript", true],
+        ["Incomplete", "ready", "Transcript ready", "Open transcript", true],
+        ["Saved", "failed", "Transcription failed", "Try again", false],
+    ]
+    for c in cases {
+        v := NoticeView(c[1], c[2])
+        Check(v.heading = c[3] && v.primary = c[4] && v.again = c[5],
+            Format("{} / '{}': heading '{}', button '{}', again {}", c[1], c[2], v.heading, v.primary, v.again))
+    }
+    for name, kind in Map("C:\Rec\a - Recording - 1a2b3c4d.wav", "Saved", "C:\Rec\a - Recording - 1a2b3c4d - Incomplete.wav", "Incomplete"
+        , "C:\Rec\a - Recording - 1a2b3c4d - Recovered incomplete.wav", "Incomplete")
+        Check(RecordingKind(name) = kind, name " was taken as " RecordingKind(name))
+}
+
+; #8: Dismiss looked like it ended the transcription, and the tray showed no way back to it.
+; While transcribing, a status line at the top of the tray menu says how far it has come.
+TestTrayMenu() {
+    m := Menu()
+    BuildTrayMenu(m)
+    items := ["Start / stop recording", "Latest recording", "Transcribe a recording...", "Open recordings", ""
+        , "Settings", "Help", "About Meeting Recorder", "", "Repair audio backend", "Exit"]
+    Check(Join(MenuLabels(m.Handle)) = Join(items), "Tray menu was: " Join(MenuLabels(m.Handle)))
+    titles := []
+    for topic in HelpTopics()
+        titles.Push(topic.title)
+    help := DllCall("GetSubMenu", "Ptr", m.Handle, "Int", 6, "Ptr")
+    Check(help && Join(MenuLabels(help)) = Join(titles), "Help submenu was: " (help ? Join(MenuLabels(help)) : "(none)"))
+
+    Check(TrayStatusText("", 0) = "", "Idle must show no status line")
+    Check(TrayStatusText("Error", 0) = "", "A failed transcription must show no status line")
+    Check(TrayStatusText("Installing", 0) = "Getting the transcriber ready...", "Setup: " TrayStatusText("Installing", 0))
+    Check(TrayStatusText("Working", 42) = "Transcribing: 42% done", "Working: " TrayStatusText("Working", 42))
+    SetTrayStatus(m, "Transcribing: 5% done")
+    Check(Join(MenuLabels(m.Handle)) = Join(["Transcribing: 5% done", ""]) "|" Join(items), "With status: " Join(MenuLabels(m.Handle)))
+    SetTrayStatus(m, "Transcribing: 42% done")
+    Check(Join(MenuLabels(m.Handle)) = Join(["Transcribing: 42% done", ""]) "|" Join(items), "After progress: " Join(MenuLabels(m.Handle)))
+    SetTrayStatus(m, "")
+    Check(Join(MenuLabels(m.Handle)) = Join(items), "After done: " Join(MenuLabels(m.Handle)))
+    SetTrayStatus(m, "")
+    Check(Join(MenuLabels(m.Handle)) = Join(items), "Removing twice changed the menu: " Join(MenuLabels(m.Handle)))
+}
+
+; #8: Help opens a topic from the tray menu; About says which version this is.
+TestHelpAndAbout() {
+    topic := {title: "Demo", what: "What it is.", steps: ["Do this.", "Then that."], keys: [["Ctrl + Alt + R", "Start or stop."]], legend: [], more: "Extra detail."}
+    expected := "What it is.`n`n1. Do this.`n2. Then that.`n`nCtrl + Alt + R: Start or stop.`n`nExtra detail."
+    Check(HelpText(topic) = expected, "Help text was:`n" HelpText(topic))
+    bare := {title: "Bare", what: "Only this.", steps: [], keys: [], legend: []}
+    Check(HelpText(bare) = "Only this.", "Help text without steps was:`n" HelpText(bare))
+    Check(InStr(AboutText("1.2.3"), "Version 1.2.3"), "About text was:`n" AboutText("1.2.3"))
+}
+
+; #8: the app has its own icon. It is set before the first window, so windows and message boxes
+; get it too, and every toast uses it instead of a generic one.
+TestAppIcon() {
+    path := Root "\MeetingRecorder.ico"
+    Check(FileExist(path), "MeetingRecorder.ico is missing")
+    f := FileOpen(path, "r")
+    reserved := f.ReadUShort(), type := f.ReadUShort(), count := f.ReadUShort(), sizes := Map()
+    loop count {
+        w := f.ReadUChar(), f.Pos += 15
+        sizes[w = 0 ? 256 : w] := true
+    }
+    f.Close()
+    Check(reserved = 0 && type = 1, "MeetingRecorder.ico is not an icon file")
+    for size in [16, 32, 48, 256]
+        Check(sizes.Has(size), "MeetingRecorder.ico has no " size " px image")
+    src := FileRead(Root "\MeetingRecorder.ahk", "UTF-8")
+    iconAt := RegExMatch(src, 'm)^TraySetIcon\(A_ScriptDir "\\MeetingRecorder\.ico"\)')
+    Check(iconAt && iconAt < InStr(src, "Gui("), "TraySetIcon(MeetingRecorder.ico) must run before the first window is made")
+    pos := 1
+    while pos := RegExMatch(src, "TrayTip\(([^\r\n]*)\)", &m, pos) {
+        Check(RegExMatch(m[1], ",\s*0x24$"), "Toast without the app icon: " m[0])
+        pos += m.Len
+    }
+}
+
 ; ---------------------------------------------------------------- helpers
+
+; Labels of a menu as the user sees them, by position; separators are "".
+MenuLabels(hMenu) {
+    labels := []
+    loop DllCall("GetMenuItemCount", "Ptr", hMenu, "Int") {
+        buf := Buffer(512, 0)
+        DllCall("GetMenuStringW", "Ptr", hMenu, "UInt", A_Index - 1, "Ptr", buf, "Int", 256, "UInt", 0x400)
+        labels.Push(StrGet(buf))
+    }
+    return labels
+}
+Join(list) {
+    s := ""
+    for x in list
+        s .= (A_Index > 1 ? "|" : "") x
+    return s
+}
+; Stand-ins for the app's menu commands, so BuildTrayMenu() can be built here.
+Toggle(*) => 0
+ShowLatest(*) => 0
+PickRecording(*) => 0
+OpenFolder(*) => 0
+Settings(*) => 0
+ShowHelp(*) => 0
+ShowAbout(*) => 0
+Repair(*) => 0
+Quit(*) => 0
+ShowTranscribing(*) => 0
 
 Out(text) => FileAppend(text "`n", "*", "UTF-8")
 Q(s) => '"' s '"'

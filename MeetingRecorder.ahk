@@ -1,7 +1,9 @@
 ﻿#Requires AutoHotkey v2.0
 #SingleInstance Ignore
 Persistent
-AppVersion := "0.3.0"
+; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
+TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
+AppVersion := "0.4.0"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -23,6 +25,7 @@ StartTick := 0
 Closing := false
 Completion := 0
 CompletionWav := ""    ; the recording the Recording saved window is about
+CompletionKind := ""   ; "Saved" or "Incomplete"
 ; Transcription on this PC (#7). TxState: "", "Installing", "Working", "Error".
 TxState := "", TxWav := "", TxPid := 0, TxStart := 0, TxPercent := 0, TxDetail := ""
 TxStatusPath := AppDir "\transcribe.ini"
@@ -42,12 +45,7 @@ OnMessage(0x0232, RememberPosition)
 OnMessage(0x0218, PowerEvent)
 OnExit(ExitHandler)
 A_TrayMenu.Delete()
-A_TrayMenu.Add("Start / stop recording", Toggle)
-A_TrayMenu.Add("Show latest recording", ShowLatest)
-A_TrayMenu.Add("Open recordings", OpenFolder)
-A_TrayMenu.Add("Settings", Settings)
-A_TrayMenu.Add("Repair audio backend", Repair)
-A_TrayMenu.Add("Exit", Quit)
+BuildTrayMenu(A_TrayMenu)
 try Hotkey(Shortcut, Toggle)
 catch {
  MsgBox("Shortcut unavailable. Choose another in Settings.", "Meeting Recorder")
@@ -150,7 +148,7 @@ Poll() {
    State := "Manual only"
    Label.Text := s = "Saved" ? "Recording saved" : "Attention: recording incomplete"
    Action.Text := "Start"
-   SavedNotice(s,detail)
+   OpenNotice(Latest, s, separator ? SubStr(detail,separator+3) : "")
   } else if s = "Error" && State != "Attention required" {
    HideCallChoice()
    State := "Attention required"
@@ -187,22 +185,52 @@ ShortcutText() {
  global Shortcut
  return Shortcut = "^!r" ? "Ctrl + Alt + R" : Shortcut
 }
-SavedNotice(kind,detail) {
- global Completion, CompletionWav, Latest
+; The Recording saved window: one recording and its transcript. kind is "Saved" or "Incomplete";
+; note is why it is incomplete. Hide keeps transcribing; the tray menu brings it back (#8).
+OpenNotice(wav,kind,note:="") {
+ global Completion, CompletionWav, CompletionKind
  if IsObject(Completion)
   Completion.Destroy()
- CompletionWav := Latest
- Completion := Gui("+AlwaysOnTop +ToolWindow +E0x08000000","Recording saved")
- Completion.SetFont("s10","Segoe UI")
- Completion.AddText("w480",kind = "Saved" ? "Recording saved" : "Recording saved, but incomplete")
- Completion.AddText("w480",detail)
+ CompletionWav := wav, CompletionKind := kind
+ SplitPath(wav,&name)
+ Completion := Gui("+AlwaysOnTop +ToolWindow +E0x08000000","Meeting Recorder")
+ Completion.SetFont("s12 bold","Segoe UI")
+ Completion.AddText("vHeading w480")
+ Completion.SetFont("s10 norm")
+ Completion.AddText("vFileName w480",name (note != "" ? "`n" note : ""))
  Completion.AddText("vTranscribeStatus w480 Hidden")
  Completion.AddProgress("vTranscribeProgress w480 h10 Hidden")
  Completion.AddButton("vTranscribe w130","Transcribe").OnEvent("Click",TranscribeClick)
- Completion.AddButton("vShowFile x+8 w110","Show file").OnEvent("Click",ShowLatest)
- Completion.AddButton("vDismiss x+8 w80","Dismiss").OnEvent("Click",(*) => Completion.Hide())
+ Completion.AddButton("vShowFile x+8 w110","Show file").OnEvent("Click",(*) => ShowInExplorer(CompletionWav))
+ Completion.AddButton("vAgain x+8 w130 Hidden","Transcribe again").OnEvent("Click",TranscribeAgain)
+ Completion.AddButton("vHide x415 yp w80","Hide").OnEvent("Click",HideNotice)
+ Completion.OnEvent("Close",HideNotice)
+ Completion.OnEvent("Escape",HideNotice)
  ShowTranscribeState()
  Completion.Show("NoActivate")
+}
+; What the window says for a recording: tx is "", "busy", "ready" or "failed".
+NoticeView(kind,tx) {
+ if tx = "busy"
+  return {heading: "Transcribing", primary: "Cancel", again: false}
+ if tx = "ready"
+  return {heading: "Transcript ready", primary: "Open transcript", again: true}
+ if tx = "failed"
+  return {heading: "Transcription failed", primary: "Try again", again: false}
+ return {heading: kind = "Incomplete" ? "Recording saved, but incomplete" : "Recording saved", primary: "Transcribe", again: false}
+}
+RecordingKind(wav) {
+ return RegExMatch(wav,"i) incomplete\.wav$") ? "Incomplete" : "Saved"
+}
+HideNotice(*) {
+ global Completion, TxState
+ static told := false
+ Completion.Hide()
+ if !told && (TxState = "Working" || TxState = "Installing") {
+  told := true
+  TrayTip("Transcribing goes on. Right-click the tray icon to see how far it has come.","Meeting Recorder",0x24)
+ }
+ return true
 }
 ; The Recording saved window is always on top; messages opened from it must be too (#6).
 NoticeBox(text,title,options:="") {
@@ -211,8 +239,122 @@ NoticeBox(text,title,options:="") {
 ShowLatest(*) {
  global Latest
  if Latest != "" && FileExist(Latest)
-  Run("explorer.exe /select," Q(Latest))
+  OpenNotice(Latest,RecordingKind(Latest))
  else NoticeBox("No saved recording is available yet.","Meeting Recorder")
+}
+ShowInExplorer(wav) {
+ if FileExist(wav)
+  Run("explorer.exe /select," Q(wav))
+ else NoticeBox("The recording is no longer in its folder.","Meeting Recorder")
+}
+; Tray menu › Transcribe a recording...: any saved recording, also an older one.
+PickRecording(*) {
+ global Folder
+ path := FileSelect(1,Folder "\","Transcribe a recording","Recordings (*.wav)")
+ if path = ""
+  return
+ if RegExMatch(path,"i)\.partial\.wav$") {
+  NoticeBox("This recording is still being made. Transcribe it when it is saved.","Transcribe")
+  return
+ }
+ OpenNotice(path,RecordingKind(path))
+ if NoticeTx() = ""
+  StartChecked(path)
+}
+ShowTranscribing(*) {
+ global Completion, CompletionWav, TxWav
+ if IsObject(Completion) && CompletionWav = TxWav
+  Completion.Show("NoActivate")
+ else OpenNotice(TxWav,RecordingKind(TxWav))
+}
+BuildTrayMenu(m) {
+ m.Add("Start / stop recording",Toggle)
+ m.Add("Latest recording",ShowLatest)
+ m.Add("Transcribe a recording...",PickRecording)
+ m.Add("Open recordings",OpenFolder)
+ m.Add()
+ m.Add("Settings",Settings)
+ help := Menu()
+ for topic in HelpTopics()
+  help.Add(topic.title,ShowHelp.Bind(topic))
+ m.Add("Help",help)
+ m.Add("About Meeting Recorder",ShowAbout)
+ m.Add()
+ m.Add("Repair audio backend",Repair)
+ m.Add("Exit",Quit)
+}
+; The top line of the tray menu while transcribing; "" when there is nothing to show.
+TrayStatusText(state,percent) {
+ if state = "Installing"
+  return "Getting the transcriber ready..."
+ if state = "Working"
+  return "Transcribing: " percent "% done"
+ return ""
+}
+; Adds, renames or removes the status line (and its separator) at the top of menu m.
+SetTrayStatus(m,text) {
+ static shown := Map()
+ had := shown.Has(m.Handle) ? shown[m.Handle] : ""
+ if text = had
+  return
+ if had = "" {
+  m.Insert("1&")
+  m.Insert("1&",text,ShowTranscribing)
+ } else if text = "" {
+  m.Delete("1&")
+  m.Delete("1&")
+ } else m.Rename("1&",text)
+ shown[m.Handle] := text
+}
+ShowHelp(topic,*) {
+ static g := 0
+ if IsObject(g)
+  try g.Destroy()
+ g := Gui(,"Meeting Recorder help")
+ g.SetFont("s12 bold","Segoe UI")
+ g.AddText("w480",topic.title)
+ g.SetFont("s10 norm")
+ g.AddText("w480",HelpText(topic))
+ g.AddButton("w90 Default","Close").OnEvent("Click",(*) => g.Hide())
+ g.OnEvent("Escape",(*) => g.Hide())
+ g.Show()
+}
+; A help topic as plain text: what, numbered steps, keys, then the More fold.
+HelpText(topic) {
+ parts := [topic.what]
+ steps := ""
+ for s in topic.steps
+  steps .= (A_Index > 1 ? "`n" : "") A_Index ". " s
+ if steps != ""
+  parts.Push(steps)
+ keys := ""
+ for k in topic.keys
+  keys .= (A_Index > 1 ? "`n" : "") k[1] ": " k[2]
+ if keys != ""
+  parts.Push(keys)
+ if topic.HasOwnProp("more") && topic.more != ""
+  parts.Push(topic.more)
+ text := ""
+ for p in parts
+  text .= (A_Index > 1 ? "`n`n" : "") p
+ return text
+}
+AboutText(version) {
+ return "Meeting Recorder`nVersion " version "`n`nRecords your calls and turns them into text, all on this PC."
+}
+ShowAbout(*) {
+ global AppVersion
+ static g := 0
+ if IsObject(g)
+  try g.Destroy()
+ g := Gui(,"About Meeting Recorder")
+ g.SetFont("s10","Segoe UI")
+ g.AddPicture("w48 h48",A_ScriptDir "\MeetingRecorder.ico")
+ g.AddText("x+16 yp w340",AboutText(AppVersion))
+ g.AddLink("xp w340",'<a href="https://github.com/kennethaar/MeetingRecorder">Project page on GitHub</a>')
+ g.AddButton("xp w90 Default","OK").OnEvent("Click",(*) => g.Hide())
+ g.OnEvent("Escape",(*) => g.Hide())
+ g.Show()
 }
 OpenFolder(*) {
  global Folder
@@ -302,18 +444,37 @@ ExitHandler(reason,code) {
 ; Transcribe.py runs WhisperX on the saved WAV and reports through transcribe.ini; the app then
 ; writes <recording>.txt and .srt next to the WAV. Left channel = Others, right = Me.
 TranscribeClick(*) {
- global CompletionWav, TxWav, TxState
- wav := CompletionWav
- if TxWav = wav && (TxState = "Working" || TxState = "Installing") {
+ global CompletionWav
+ tx := NoticeTx()
+ if tx = "busy" {
   StopTranscriber()
   ShowTranscribeState()
- } else if FileExist(TranscriptPath(wav,"txt")) {
-  Run(Q(TranscriptPath(wav,"txt")))
- } else if TxState = "Working" || TxState = "Installing" {
+ } else if tx = "ready" {
+  Run(Q(TranscriptPath(CompletionWav,"txt")))
+ } else StartChecked(CompletionWav)
+}
+; A transcript can be made again; the new one replaces it (#8).
+TranscribeAgain(*) {
+ global CompletionWav
+ if NoticeBox("Make a new transcript? It replaces the one you have now.","Transcribe again","YesNo") = "Yes"
+  StartChecked(CompletionWav)
+}
+StartChecked(wav) {
+ global TxState
+ if TxState = "Working" || TxState = "Installing"
   NoticeBox("Another recording is being transcribed. Try again when it is done.","Transcribe")
- } else if !FileExist(wav) {
+ else if !FileExist(wav)
   NoticeBox("The recording is no longer in its folder, so it cannot be transcribed.","Transcribe")
- } else StartTranscribe(wav)
+ else StartTranscribe(wav)
+}
+; The transcript state of the recording the window is about: "", "busy", "ready" or "failed".
+NoticeTx() {
+ global CompletionWav, TxWav, TxState
+ if TxWav = CompletionWav && (TxState = "Working" || TxState = "Installing")
+  return "busy"
+ if TxWav = CompletionWav && TxState = "Error"
+  return "failed"
+ return FileExist(TranscriptPath(CompletionWav,"txt")) ? "ready" : ""
 }
 StartTranscribe(wav) {
  global TxState, TxWav, TxPid, TxStart, TxPercent, TxDetail, TxStatusPath, TxSegmentsPath, TxSetupPath
@@ -383,7 +544,7 @@ AnnounceTranscript() {
   Completion.Show("NoActivate")
  else {
   SplitPath(TxWav,,,,&name)
-  TrayTip(name, TxState = "Error" ? "Transcription failed" : "Transcript ready")
+  TrayTip(name, TxState = "Error" ? "Transcription failed" : "Transcript ready", 0x24)
  }
 }
 StopTranscriber() {
@@ -393,26 +554,26 @@ StopTranscriber() {
   RunWait(A_ComSpec " /c taskkill /PID " TxPid " /T /F",, "Hide")
  TxState := "", TxPid := 0
 }
-; Shows the transcription state of the recording the Recording saved window is about.
+; Shows the transcription state in the tray menu, and in the Recording saved window for the
+; recording it is about.
 ShowTranscribeState() {
- global Completion, CompletionWav, TxWav, TxState, TxStart, TxPercent, TxDetail
+ global Completion, CompletionKind, TxState, TxStart, TxPercent, TxDetail
+ SetTrayStatus(A_TrayMenu, TrayStatusText(TxState, Round(IsNumber(TxPercent) ? TxPercent : 0)))
  if !IsObject(Completion)
   return
- status := Completion["TranscribeStatus"], bar := Completion["TranscribeProgress"], button := Completion["Transcribe"]
- busy := TxWav = CompletionWav && (TxState = "Working" || TxState = "Installing")
- if busy {
-  status.Text := TxDetail "...  " (A_TickCount - TxStart)//60000 " min. You can keep working."
+ tx := NoticeTx()
+ v := NoticeView(CompletionKind, tx)
+ Completion["Heading"].Text := v.heading
+ Completion["Transcribe"].Text := v.primary
+ Completion["Again"].Visible := v.again
+ status := Completion["TranscribeStatus"], bar := Completion["TranscribeProgress"]
+ if tx = "busy" {
+  status.Text := TxDetail "...  " (A_TickCount - TxStart)//60000 " min. Click Hide to keep working."
   bar.Value := TxPercent
-  button.Text := "Cancel"
- } else if FileExist(TranscriptPath(CompletionWav,"txt")) {
-  status.Text := "Transcript ready"
-  button.Text := "Open transcript"
- } else if TxWav = CompletionWav && TxState = "Error" {
-  status.Text := "Transcription failed: " TxDetail
-  button.Text := "Try again"
- } else button.Text := "Transcribe"
- status.Visible := busy || button.Text != "Transcribe"
- bar.Visible := busy
+ } else if tx = "failed"
+  status.Text := TxDetail
+ status.Visible := tx = "busy" || tx = "failed"
+ bar.Visible := tx = "busy"
 }
 
 ; WhisperX in a portable Python: this app's own install, else the one PodcastClipper made.
@@ -686,23 +847,41 @@ HelpTopics() {
         {
             id: "transcribe",
             title: "Transcribe a recording",
-            words: "transcribe transcript text subtitles srt whisper whisperx word notes minutes saved",
-            what: "Turns a saved recording into text on this PC. Nothing is uploaded. What the others said is marked Others. What you said is marked Me.",
+            words: "transcribe transcript text subtitles srt whisper whisperx word notes minutes saved again redo older hide progress",
+            what: "Turns a saved recording into text on this PC. Nothing is uploaded. Lines are marked Others or Me.",
             steps: [
-                "When a recording is saved, click Transcribe.",
-                "Keep working. The bar shows how far it has come.",
+                "Click Transcribe when a recording is saved.",
+                "Click Hide to keep working. The tray icon shows how far it has come.",
                 "Click Open transcript when it is ready.",
+                "For an older recording, use Transcribe a recording in the tray menu.",
             ],
             keys: [],
             legend: [
-                ["?Saved.TranscribeStatus", "What the transcriber is doing"],
-                ["?Saved.TranscribeProgress", "How far it has come"],
+                ["Saved.Heading", "What is new"],
+                ["Saved.FileName", "The recording"],
+                ["?Saved.TranscribeStatus", "What it is doing"],
+                ["?Saved.TranscribeProgress", "Progress"],
                 ["Saved.Transcribe", "Transcribe, cancel, or open the transcript"],
-                ["Saved.ShowFile", "Show the recording in Explorer"],
-                ["Saved.Dismiss", "Close this window. Transcribing goes on."],
+                ["Saved.ShowFile", "Show it in Explorer"],
+                ["?Saved.Again", "Make a new transcript"],
+                ["Saved.Hide", "Hide. Transcribing goes on."],
             ],
             view: "Saved",
-            more: "The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. A long meeting can take about as long to transcribe as it lasted. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
+            more: "Others is what you heard. Me is your microphone. Transcribe again replaces the transcript you have. To get this window back, choose Latest recording in the tray menu. The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. A long meeting can take about as long to transcribe as it lasted. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
+        },
+        {
+            id: "tray",
+            title: "Tray menu",
+            words: "tray icon menu notification area clock red dot latest recording help about version progress",
+            what: "The red dot in the notification area, by the clock, is the app. Right-click it for everything the app can do.",
+            steps: [
+                "Right-click the red dot.",
+                "Choose Latest recording to see the last recording and its transcript.",
+                "Choose Help to read a topic, or About to see the version.",
+            ],
+            keys: [],
+            legend: [],
+            more: "While a recording is transcribed, the top line of the menu shows how far it has come. Click it to see the transcript window. If the red dot is hidden, click the arrow by the clock.",
         },
         {
             id: "recovery",

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0 - 2026-11-13
+
+- Transcribe a recording: Hide now tucks the window away while transcribing
+  goes on, and the tray menu shows how far it has come. The window heading
+  says what is new, such as Transcript ready (#8).
+- Transcribe a recording: Transcribe again makes a new transcript, and
+  Transcribe a recording in the tray menu works for any earlier recording (#8).
+- Tray menu: Latest recording opens the recording and its transcript instead
+  of the folder, and Help and About are new in the menu (#8).
+- Tray menu: The app has its own icon, a red record dot, on the tray, in its
+  windows and in its messages (#8).
+
 ## 0.3.0 - 2026-11-13
 
 - Transcribe a recording: Click Transcribe when a recording is saved to get it

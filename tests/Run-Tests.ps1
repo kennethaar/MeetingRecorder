@@ -12,7 +12,8 @@ New-Item -ItemType Directory -Force $testDir | Out-Null
 $app = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\MeetingRecorder.ahk'))
 $functions = 'HelpTopics', 'TeamsCallActive', 'RegQword', 'PickMeeting', 'ComDateToStamp', 'RecordingName', 'NoticeBox',
     'TranscriptText', 'SubtitleText', 'Clock', 'SortSegments', 'TranscriptPath', 'FindTranscriber',
-    'TranscribeCommand', 'ReadSegments', 'WriteTranscript'
+    'TranscribeCommand', 'ReadSegments', 'WriteTranscript', 'NoticeView', 'RecordingKind', 'BuildTrayMenu',
+    'TrayStatusText', 'SetTrayStatus', 'HelpText', 'AboutText'
 $code = foreach ($name in $functions) {
     $m = [regex]::Match($app, "(?ms)^$name\([^)\r\n]*\) \{.*?^\}")
     if ($m.Success) { $m.Value } else { "$name(*) {`n    throw Error(`"No $name() function in MeetingRecorder.ahk`")`n}" }
