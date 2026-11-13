@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.1 - 2026-11-13
+
+- Tray menu: Click the red dot to open the panel. Right-click still opens the
+  menu (#9).
+- Record a meeting: The panel says plainly what is happening, such as Ready to
+  record, with the shortcut below it, and has no empty space beside the
+  buttons (#9).
+- Transcribe a recording: The Recording saved window shows the meeting name and
+  when it was recorded, and keeps no empty gap above its buttons (#9).
+- Settings: The folder fits on one line with Browse beside it, Cancel closes
+  without saving, and the buttons sit at the bottom right like in other
+  Windows apps (#9).
+
 ## 0.4.0 - 2026-11-13
 
 - Transcribe a recording: Hide now tucks the window away while transcribing

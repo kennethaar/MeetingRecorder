@@ -3,7 +3,7 @@
 Persistent
 ; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
 TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
-AppVersion := "0.4.0"
+AppVersion := "0.4.1"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -31,13 +31,12 @@ TxState := "", TxWav := "", TxPid := 0, TxStart := 0, TxPercent := 0, TxDetail :
 TxStatusPath := AppDir "\transcribe.ini"
 TxSegmentsPath := AppDir "\transcribe.tsv"
 TxSetupPath := AppDir "\transcriber-setup.ini"
-Panel := Gui("+AlwaysOnTop +ToolWindow +E0x08000000", "Meeting Recorder")
-Panel.SetFont("s10", "Segoe UI")
-Label := Panel.AddText("vStatus w350", "Preparing audio backend...")
-Action := Panel.AddButton("vAction w100", "Start")
+Panel := MakePanel()
+Action := Panel["Action"]
 Action.OnEvent("Click", Toggle)
-Panel.AddButton("vSettings x+8 w100", "Settings").OnEvent("Click", Settings)
-NotNow := Panel.AddButton("vNotNow x+8 w120 Hidden", "Not now")
+SettingsButton := Panel["Settings"]
+SettingsButton.OnEvent("Click", Settings)
+NotNow := Panel["NotNow"]
 NotNow.OnEvent("Click", NotNowClick)
 Panel.OnEvent("Close", (*) => Offering ? EndOffer() : Panel.Hide())
 OnMessage(0x0010, PreventRecordingClose)
@@ -46,6 +45,8 @@ OnMessage(0x0218, PowerEvent)
 OnExit(ExitHandler)
 A_TrayMenu.Delete()
 BuildTrayMenu(A_TrayMenu)
+; One click on the tray icon opens the panel (#9).
+A_TrayMenu.ClickCount := 1
 try Hotkey(Shortcut, Toggle)
 catch {
  MsgBox("Shortcut unavailable. Choose another in Settings.", "Meeting Recorder")
@@ -57,15 +58,56 @@ Repair()
 SetTimer(Poll, 200)
 SetTimer(DetectCall, 2000)
 if !FileExist(Config) {
- MsgBox("This draft records manually.`n`nLeft: all audio on your Windows communications output.`nRight: your communications microphone.`n`nMuting in a call may NOT mute this recording.`nThe app does not notify participants. Follow your organization's recording rules.`n`nFiles: " Folder "`n`nFirst launch downloads NAudio 2.2.1. Later recording works offline.`nWhen a Teams call starts, the panel offers to record it. It never records by itself.", "Set up Meeting Recorder")
+ MsgBox("Meeting Recorder records your calls on this PC. Start or stop with " ShortcutText() ".`n`nWhen a Teams call starts, it offers to record. It never records by itself.`n`nMuting yourself in the call may not mute the recording. Others are not told that you record, so follow the rules where you work.", "Welcome to Meeting Recorder", "Iconi")
  Settings()
 }
 
+; ---------------------------------------------------------------- windows (#9)
+; Layout rules, checked by the layout test: the same margin all round, buttons at the bottom
+; right, and no space held for hidden controls. Text that may be too long ends in "..." (0x4000).
+; The panel: what is happening, a quiet hint below it, and two buttons. Not now / Keep recording
+; takes the place of Settings while a Teams call is offered.
+MakePanel() {
+ g := Gui("+AlwaysOnTop +ToolWindow +E0x08000000", "Meeting Recorder")
+ g.MarginX := 14, g.MarginY := 12
+ g.SetFont("s11 w600", "Segoe UI")
+ g.AddText("vStatus w280 +0x4000", "Getting ready...")
+ g.SetFont("s9 w400 c595959")
+ g.AddText("vHint y+2 w280 +0x4000", "")
+ g.SetFont("s10 cDefault")
+ g.AddButton("vAction xm y+10 w136 Default", "Start")
+ g.AddButton("vSettings x+8 w136", "Settings")
+ g.AddButton("vNotNow xp yp w136 Hidden", "Not now")
+ return g
+}
+; The two lines of the panel in a steady state.
+PanelLines(state, shortcut) {
+ if state = "Installing"
+  return {status: "Getting ready...", hint: "The first start takes a minute."}
+ if state = "Manual only"
+  return {status: "Ready to record", hint: "Start or stop: " shortcut}
+ if state = "Starting"
+  return {status: "Starting...", hint: "Start or stop: " shortcut}
+ if state = "Saving"
+  return {status: "Saving...", hint: "Keep the app open until it is saved."}
+ return {status: state, hint: ""}
+}
 Q(s) => Chr(34) s Chr(34)
 PSCommand(mode) {
  return Q(A_WinDir "\System32\WindowsPowerShell\v1.0\powershell.exe") " -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " Q(A_ScriptDir "\Backend.ps1") " -Mode " mode
 }
-ShowPanel() {
+; The panel's two lines: what is happening, and a quiet hint below it.
+SetStatus(status, hint := "") {
+ global Panel
+ Panel["Status"].Text := status
+ Panel["Hint"].Text := hint
+}
+ShowState() {
+ global State
+ v := PanelLines(State, ShortcutText())
+ SetStatus(v.status, v.hint)
+}
+ShowPanel(*) {
  global Panel, Config
  x := IniRead(Config,"UI","X",20), y := IniRead(Config,"UI","Y",20)
  if (x < 0 || x > A_ScreenWidth - 100 || y < 0 || y > A_ScreenHeight - 60)
@@ -73,17 +115,17 @@ ShowPanel() {
  Panel.Show("NoActivate x" x " y" y)
 }
 Repair(*) {
- global State, Child, StatusPath, Label
+ global State, Child, StatusPath
  if Child && ProcessExist(Child)
   return
  try FileDelete(StatusPath)
  State := "Installing"
- Label.Text := "Preparing audio backend..."
+ ShowState()
  ShowPanel()
  Run(PSCommand("Setup") " -Status " Q(StatusPath),, "Hide", &Child)
 }
 Toggle(*) {
- global State, Child, Folder, StatusPath, StopPath, StartTick, Label, Action, InCall, MeetingTitle
+ global State, Child, Folder, StatusPath, StopPath, StartTick, Action, InCall, MeetingTitle
  if State = "Recording" || State = "Starting" {
   StopRecording()
   return
@@ -105,14 +147,14 @@ Toggle(*) {
   try FileDelete(StatusPath)
   name := RecordingName(Folder, InCall ? MeetingTitle : "", FormatTime(,"yyyy-MM-dd HHmmss"), SubStr(CreateGuid(),1,8))
   State := "Starting"
-  Label.Text := "Starting capture..."
+  ShowState()
   Action.Text := "Stop"
   ShowPanel()
   Run(PSCommand("Record") " -Output " Q(name) " -Status " Q(StatusPath) " -Stop " Q(StopPath) " -ParentId " DllCall("GetCurrentProcessId"),, "Hide", &Child)
   StartTick := A_TickCount
  } catch as e {
   State := "Attention required"
-  Label.Text := e.Message
+  SetStatus("Cannot start recording", e.Message)
   ShowPanel()
  }
 }
@@ -123,16 +165,16 @@ CreateGuid() {
  return StrReplace(StrReplace(StrGet(s),"{"),"}")
 }
 StopRecording(*) {
- global State, StopPath, Label
+ global State, StopPath
  if State != "Recording" && State != "Starting"
   return
  FileAppend("stop",StopPath)
  HideCallChoice()
  State := "Saving"
- Label.Text := "Saving recording..."
+ ShowState()
 }
 Poll() {
- global State, Child, StatusPath, StartTick, Label, Action, Latest, Config, Closing, CallEnded, TxState, TxPercent
+ global State, Child, StatusPath, StartTick, Action, Latest, Config, Closing, CallEnded, TxState, TxPercent
  if FileExist(StatusPath) {
   s := IniRead(StatusPath,"Capture","State","")
   detail := IniRead(StatusPath,"Capture","Detail","")
@@ -146,26 +188,26 @@ Poll() {
    IniWrite(Latest,Config,"Settings","Latest")
    HideCallChoice()
    State := "Manual only"
-   Label.Text := s = "Saved" ? "Recording saved" : "Attention: recording incomplete"
+   SetStatus(s = "Saved" ? "Recording saved" : "Recording incomplete", "Start or stop: " ShortcutText())
    Action.Text := "Start"
    OpenNotice(Latest, s, separator ? SubStr(detail,separator+3) : "")
   } else if s = "Error" && State != "Attention required" {
    HideCallChoice()
    State := "Attention required"
-   Label.Text := "Capture failed. Check details."
+   SetStatus("Recording failed", "Look in the recording folder for rescued audio.")
    Action.Text := "Start"
    ShowPanel()
    MsgBox(detail "`n`nCheck the recording folder for recovery audio. Use Repair audio backend if setup failed.","Recording needs attention")
   } else if s = "Ready" && State = "Installing" {
    State := "Manual only"
-   Label.Text := "Manual only | " ShortcutText()
+   ShowState()
    Action.Text := "Start"
   }
  }
  if State = "Recording" {
   seconds := (A_TickCount-StartTick)//1000
   elapsed := Format("{:02}:{:02}:{:02}",seconds//3600,Mod(seconds//60,60),Mod(seconds,60))
-  Label.Text := (CallEnded ? "Teams call ended. Recording  " : "Recording  ") elapsed
+  SetStatus("Recording  " elapsed, CallEnded ? "The Teams call ended. Stop to save." : "Stop: " ShortcutText())
   A_IconTip := "Meeting Recorder`nRecording: " elapsed
  } else A_IconTip := "Meeting Recorder`n" State (TxState = "Working" ? "`nTranscribing " TxPercent "%" : "")
  if Child && !ProcessExist(Child) {
@@ -173,7 +215,7 @@ Poll() {
   if State = "Recording" || State = "Starting" || State = "Saving" || State = "Installing" {
    HideCallChoice()
    State := "Attention required"
-   Label.Text := "Backend stopped. Recovery audio may remain."
+   SetStatus("Recording stopped", "Look in the recording folder for rescued audio.")
    Action.Text := "Start"
    ShowPanel()
   }
@@ -192,22 +234,79 @@ OpenNotice(wav,kind,note:="") {
  if IsObject(Completion)
   Completion.Destroy()
  CompletionWav := wav, CompletionKind := kind
- SplitPath(wav,&name)
- Completion := Gui("+AlwaysOnTop +ToolWindow +E0x08000000","Meeting Recorder")
- Completion.SetFont("s12 bold","Segoe UI")
- Completion.AddText("vHeading w480")
- Completion.SetFont("s10 norm")
- Completion.AddText("vFileName w480",name (note != "" ? "`n" note : ""))
- Completion.AddText("vTranscribeStatus w480 Hidden")
- Completion.AddProgress("vTranscribeProgress w480 h10 Hidden")
- Completion.AddButton("vTranscribe w130","Transcribe").OnEvent("Click",TranscribeClick)
- Completion.AddButton("vShowFile x+8 w110","Show file").OnEvent("Click",(*) => ShowInExplorer(CompletionWav))
- Completion.AddButton("vAgain x+8 w130 Hidden","Transcribe again").OnEvent("Click",TranscribeAgain)
- Completion.AddButton("vHide x415 yp w80","Hide").OnEvent("Click",HideNotice)
+ Completion := MakeNotice(wav,kind,note)
+ Completion["Transcribe"].OnEvent("Click",TranscribeClick)
+ Completion["ShowFile"].OnEvent("Click",(*) => ShowInExplorer(CompletionWav))
+ Completion["Again"].OnEvent("Click",TranscribeAgain)
+ Completion["Hide"].OnEvent("Click",HideNotice)
  Completion.OnEvent("Close",HideNotice)
  Completion.OnEvent("Escape",HideNotice)
  ShowTranscribeState()
- Completion.Show("NoActivate")
+ Completion.Show("AutoSize NoActivate")
+}
+; Heading, the meeting name, when it was recorded (and why it is incomplete), the transcribing
+; status and progress when there is any, then the buttons with Hide at the right.
+MakeNotice(wav,kind,note) {
+ t := RecordingTitle(wav)
+ when := Trim(t.when "`n" note, "`n")
+ g := Gui("+AlwaysOnTop +ToolWindow +E0x08000000","Meeting Recorder")
+ g.MarginX := 16, g.MarginY := 14
+ g.SetFont("s12 w600","Segoe UI")
+ g.AddText("vHeading w480",NoticeView(kind,"").heading)
+ g.SetFont("s10 w400")
+ g.AddText("vFileName w480",t.name)
+ g.SetFont("s9 c595959")
+ g.AddText("vWhen w480" (when = "" ? " Hidden" : ""),when)
+ g.SetFont("s10 cDefault")
+ g.AddText("vTranscribeStatus w480 Hidden")
+ g.AddProgress("vTranscribeProgress w480 h8 Hidden")
+ g.AddButton("vTranscribe w130 Default","Transcribe")
+ g.AddButton("vShowFile x+8 w100","Show file")
+ g.AddButton("vAgain x+8 w130 Hidden","Transcribe again")
+ g.AddButton("vHide x416 yp w80","Hide")
+ LayoutNotice(g)
+ return g
+}
+; Stacks the visible rows with no space for hidden ones. Returns true when the buttons moved.
+LayoutNotice(g) {
+ g["Heading"].GetPos(,&y,,&h)
+ y += h
+ for row in [["FileName",6],["When",2],["TranscribeStatus",12],["TranscribeProgress",6]] {
+  c := g[row[1]]
+  if !c.Visible
+   continue
+  if c.Type = "Text"
+   FitHeight(c)
+  c.GetPos(,,,&h)
+  c.Move(,y += row[2])
+  y += h
+ }
+ y += 16
+ g["Transcribe"].GetPos(,&was)
+ for name in ["Transcribe","ShowFile","Again","Hide"]
+  g[name].Move(,y)
+ return was != y
+}
+; Makes a text control as tall as its wrapped text.
+FitHeight(c) {
+ r := Buffer(16,0)
+ DllCall("GetClientRect","Ptr",c.Hwnd,"Ptr",r)
+ hdc := DllCall("GetDC","Ptr",c.Hwnd,"Ptr")
+ old := DllCall("SelectObject","Ptr",hdc,"Ptr",SendMessage(0x31,0,0,c),"Ptr")
+ DllCall("DrawTextW","Ptr",hdc,"Str",c.Text = "" ? " " : c.Text,"Int",-1,"Ptr",r,"UInt",0x400|0x800|0x10)
+ DllCall("SelectObject","Ptr",hdc,"Ptr",old)
+ DllCall("ReleaseDC","Ptr",c.Hwnd,"Ptr",hdc)
+ c.Move(,,,Ceil(NumGet(r,12,"Int")*96/A_ScreenDPI))
+}
+; The meeting name and when it was recorded, from <stamp> - <name> - <id>[ - Incomplete].wav.
+; Any other file name is shown as it is.
+RecordingTitle(wav) {
+ SplitPath(wav,,,,&base)
+ base := RegExReplace(base,"i) - (Recovered incomplete|Incomplete)$")
+ if !RegExMatch(base,"i)^(\d{4})-(\d\d)-(\d\d) (\d{6}) - (.+) - [0-9A-F]{8}$",&m) || !IsTime(m[1] m[2] m[3] m[4])
+  return {name: base, when: ""}
+ stamp := m[1] m[2] m[3] m[4]
+ return {name: m[5], when: FormatTime(stamp,"LongDate") ", " FormatTime(stamp,"HH:mm")}
 }
 ; What the window says for a recording: tx is "", "busy", "ready" or "failed".
 NoticeView(kind,tx) {
@@ -264,10 +363,13 @@ PickRecording(*) {
 ShowTranscribing(*) {
  global Completion, CompletionWav, TxWav
  if IsObject(Completion) && CompletionWav = TxWav
-  Completion.Show("NoActivate")
+  Completion.Show("AutoSize NoActivate")
  else OpenNotice(TxWav,RecordingKind(TxWav))
 }
 BuildTrayMenu(m) {
+ m.Add("Open Meeting Recorder",ShowPanel)
+ m.Default := "Open Meeting Recorder"
+ m.Add()
  m.Add("Start / stop recording",Toggle)
  m.Add("Latest recording",ShowLatest)
  m.Add("Transcribe a recording...",PickRecording)
@@ -310,14 +412,20 @@ ShowHelp(topic,*) {
  static g := 0
  if IsObject(g)
   try g.Destroy()
- g := Gui(,"Meeting Recorder help")
- g.SetFont("s12 bold","Segoe UI")
- g.AddText("w480",topic.title)
- g.SetFont("s10 norm")
- g.AddText("w480",HelpText(topic))
- g.AddButton("w90 Default","Close").OnEvent("Click",(*) => g.Hide())
+ g := MakeHelp(topic)
+ g["Close"].OnEvent("Click",(*) => g.Hide())
  g.OnEvent("Escape",(*) => g.Hide())
  g.Show()
+}
+MakeHelp(topic) {
+ g := Gui("-MinimizeBox","Meeting Recorder help")
+ g.MarginX := 16, g.MarginY := 14
+ g.SetFont("s12 w600","Segoe UI")
+ g.AddText("w480",topic.title)
+ g.SetFont("s10 w400")
+ g.AddText("y+8 w480",HelpText(topic))
+ g.AddButton("vClose x406 y+16 w90 Default","Close")
+ return g
 }
 ; A help topic as plain text: what, numbered steps, keys, then the More fold.
 HelpText(topic) {
@@ -347,14 +455,20 @@ ShowAbout(*) {
  static g := 0
  if IsObject(g)
   try g.Destroy()
- g := Gui(,"About Meeting Recorder")
- g.SetFont("s10","Segoe UI")
- g.AddPicture("w48 h48",A_ScriptDir "\MeetingRecorder.ico")
- g.AddText("x+16 yp w340",AboutText(AppVersion))
- g.AddLink("xp w340",'<a href="https://github.com/kennethaar/MeetingRecorder">Project page on GitHub</a>')
- g.AddButton("xp w90 Default","OK").OnEvent("Click",(*) => g.Hide())
+ g := MakeAbout(AppVersion,A_ScriptDir "\MeetingRecorder.ico")
+ g["OK"].OnEvent("Click",(*) => g.Hide())
  g.OnEvent("Escape",(*) => g.Hide())
  g.Show()
+}
+MakeAbout(version,icon) {
+ g := Gui("-MinimizeBox","About Meeting Recorder")
+ g.MarginX := 16, g.MarginY := 14
+ g.SetFont("s10","Segoe UI")
+ g.AddPicture("w48 h48",icon)
+ g.AddText("x+16 yp w380",AboutText(version))
+ g.AddLink("xp y+8 w380",'<a href="https://github.com/kennethaar/MeetingRecorder">Project page on GitHub</a>')
+ g.AddButton("vOK x370 y+16 w90 Default","OK")
+ return g
 }
 OpenFolder(*) {
  global Folder
@@ -362,19 +476,21 @@ OpenFolder(*) {
 }
 Settings(*) {
  global Folder, Config, Shortcut, DetectOn, CalendarOn
- g := Gui(,"Meeting Recorder settings")
- g.SetFont("s10","Segoe UI")
- g.AddText("w510","Manual recording draft. Uses Windows communications devices.`nChanges apply to the next recording.")
- g.AddText(,"Recording folder")
- f := g.AddEdit("vFolder w510",Folder)
- g.AddButton("vBrowse w100","Browse").OnEvent("Click",(*) => BrowseFolder(f))
- g.AddText(,"Shortcut")
- h := g.AddHotkey("vShortcut w220",Shortcut)
- d := g.AddCheckbox("vDetect Checked" DetectOn,"Offer to record when a Teams call starts")
+ static open := 0
+ if open && WinExist(open) {   ; one Settings window at a time
+  WinActivate(open)
+  return
+ }
  ; Only offered when classic Outlook is installed; new Outlook has no local calendar access.
- c := OutlookInstalled() ? g.AddCheckbox("vCalendar Checked" CalendarOn,"Name recordings after the meeting in classic Outlook") : 0
- g.AddText("w510","Audio test: start a short recording, speak while playing audio, then play the saved WAV. Left = output; right = microphone.")
- g.AddButton("vSave w100 Default","Save").OnEvent("Click",SaveSettings)
+ g := MakeSettings(Folder,Shortcut,DetectOn,CalendarOn,OutlookInstalled())
+ open := g.Hwnd
+ f := g["Folder"], h := g["Shortcut"], d := g["Detect"]
+ c := 0
+ try c := g["Calendar"]
+ g["Browse"].OnEvent("Click",(*) => BrowseFolder(f))
+ g["Save"].OnEvent("Click",SaveSettings)
+ g["Cancel"].OnEvent("Click",(*) => g.Destroy())
+ g.OnEvent("Escape",(*) => g.Destroy())
  g.Show()
  SaveSettings(*) {
   global Folder, Shortcut, Config, DetectOn, CalendarOn
@@ -401,6 +517,24 @@ Settings(*) {
    MsgBox(e.Message,"Settings not saved")
   }
  }
+}
+; Folder with Browse beside it, the shortcut, the Teams choices, then Save and Cancel.
+MakeSettings(folder,shortcut,detect,calendar,outlook) {
+ g := Gui("-MinimizeBox","Meeting Recorder settings")
+ g.MarginX := 16, g.MarginY := 14
+ g.SetFont("s10","Segoe UI")
+ g.AddText("w440","Save recordings in")
+ f := g.AddEdit("vFolder y+4 w340 r1 -Wrap",folder)
+ f.GetPos(,,,&h)
+ g.AddButton("vBrowse x+8 yp w92 h" h,"Browse...")
+ g.AddText("xm y+14 w440","Shortcut to start and stop")
+ g.AddHotkey("vShortcut y+4 w200",shortcut)
+ g.AddCheckbox("vDetect y+14 Checked" detect,"Offer to record when a Teams call starts")
+ if outlook
+  g.AddCheckbox("vCalendar y+8 Checked" calendar,"Name recordings after the meeting in classic Outlook")
+ g.AddButton("vSave x264 y+18 w92 Default","Save")
+ g.AddButton("vCancel x+8 w92","Cancel")
+ return g
 }
 BrowseFolder(ctrl) {
  p := DirSelect(ctrl.Value,3,"Recording folder")
@@ -541,7 +675,7 @@ AnnounceTranscript() {
  global Completion, CompletionWav, TxWav, TxState
  ShowTranscribeState()
  if IsObject(Completion) && CompletionWav = TxWav
-  Completion.Show("NoActivate")
+  Completion.Show("AutoSize NoActivate")
  else {
   SplitPath(TxWav,,,,&name)
   TrayTip(name, TxState = "Error" ? "Transcription failed" : "Transcript ready", 0x24)
@@ -574,6 +708,8 @@ ShowTranscribeState() {
   status.Text := TxDetail
  status.Visible := tx = "busy" || tx = "failed"
  bar.Visible := tx = "busy"
+ if LayoutNotice(Completion) && DllCall("IsWindowVisible","Ptr",Completion.Hwnd)
+  Completion.Show("AutoSize NoActivate")
 }
 
 ; WhisperX in a portable Python: this app's own install, else the one PodcastClipper made.
@@ -658,27 +794,32 @@ DetectCall() {
   EndOffer()
  } else if State = "Recording" || State = "Starting" {
   CallEnded := true
-  NotNow.Text := "Keep recording"
-  NotNow.Visible := true
+  ShowCallChoice("Keep recording")
   ShowPanel()
  }
 }
 OfferCall() {
- global Offering, PanelWasVisible, Panel, Label, Action, NotNow, MeetingTitle
+ global Offering, PanelWasVisible, Panel, Action, MeetingTitle
  PanelWasVisible := DllCall("IsWindowVisible","Ptr",Panel.Hwnd)
  Offering := true
- Label.Text := "Teams call started" (MeetingTitle != "" ? ": " MeetingTitle : "")
+ SetStatus("Teams call started", MeetingTitle != "" ? MeetingTitle : "Record this call?")
  Action.Text := "Record"
- NotNow.Text := "Not now"
- NotNow.Visible := true
+ ShowCallChoice("Not now")
  ShowPanel()
+}
+; Not now / Keep recording takes the place of Settings in the panel.
+ShowCallChoice(text) {
+ global NotNow, SettingsButton
+ NotNow.Text := text
+ SettingsButton.Visible := false
+ NotNow.Visible := true
 }
 ; Not now, or the call ended before recording: back to how the panel was.
 EndOffer(*) {
- global Offering, PanelWasVisible, Panel, Label, Action
+ global Offering, PanelWasVisible, Panel, Action
  HideCallChoice()
  Action.Text := "Start"
- Label.Text := "Manual only | " ShortcutText()
+ ShowState()
  if !PanelWasVisible
   Panel.Hide()
 }
@@ -689,9 +830,10 @@ NotNowClick(*) {
  else EndOffer()
 }
 HideCallChoice() {
- global Offering, CallEnded, NotNow
+ global Offering, CallEnded, NotNow, SettingsButton
  Offering := false, CallEnded := false
  NotNow.Visible := false
+ SettingsButton.Visible := true
 }
 
 ; Teams is in a call when Windows says it is using the microphone now (LastUsedTimeStop = 0).
@@ -796,6 +938,7 @@ HelpTopics() {
             keys: [["Ctrl + Alt + R", "Start or stop. You can change it in Settings."]],
             legend: [
                 ["Panel.Status", "Status and recording time"],
+                ["Panel.Hint", "The shortcut, or what to do next"],
                 ["Panel.Action", "Start or stop recording"],
                 ["Panel.Settings", "Open settings"],
             ],
@@ -840,6 +983,7 @@ HelpTopics() {
                 ["Settings.Detect", "Offer to record Teams calls"],
                 ["?Settings.Calendar", "Name files after classic Outlook meetings"],
                 ["Settings.Save", "Save changes"],
+                ["Settings.Cancel", "Close without saving"],
             ],
             view: "Settings",
             more: "The Outlook choice is shown only when classic Outlook is installed. Settings are kept in %LOCALAPPDATA%\MeetingRecorder\settings.ini.",
@@ -872,10 +1016,10 @@ HelpTopics() {
         {
             id: "tray",
             title: "Tray menu",
-            words: "tray icon menu notification area clock red dot latest recording help about version progress",
-            what: "The red dot in the notification area, by the clock, is the app. Right-click it for everything the app can do.",
+            words: "tray icon menu notification area clock red dot open panel show window latest recording help about version progress",
+            what: "The red dot in the notification area, by the clock, is the app. Click it to open the panel. Right-click it for everything else.",
             steps: [
-                "Right-click the red dot.",
+                "Click the red dot to open the panel, or right-click it for the menu.",
                 "Choose Latest recording to see the last recording and its transcript.",
                 "Choose Help to read a topic, or About to see the version.",
             ],
@@ -905,7 +1049,7 @@ HelpTopics() {
             steps: [
                 "If recording will not start, right-click the tray icon.",
                 "Choose Repair audio backend.",
-                "Wait until the panel says Manual only.",
+                "Wait until the panel says Ready to record.",
             ],
             keys: [],
             legend: [],

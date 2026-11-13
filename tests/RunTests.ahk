@@ -29,6 +29,8 @@ Tests := [
     ["Tray menu shows transcribing, recordings, Help and About (#8)", TestTrayMenu],
     ["Help and About windows show the topic and the version (#8)", TestHelpAndAbout],
     ["App icon is used on the tray, windows and toasts (#8)", TestAppIcon],
+    ["Every window is laid out cleanly: no clipped text, gaps or stray buttons (#9)", TestWindowLayout],
+    ["Panel and Recording saved window speak plainly (#9)", TestPlainWords],
 ]
 Failures := 0, Ran := 0
 for t in Tests {
@@ -387,16 +389,19 @@ TestNoticeView() {
 
 ; #8: Dismiss looked like it ended the transcription, and the tray showed no way back to it.
 ; While transcribing, a status line at the top of the tray menu says how far it has come.
+; #9: clicking the tray icon did nothing. One click opens the panel, the menu's bold default item.
 TestTrayMenu() {
     m := Menu()
     BuildTrayMenu(m)
-    items := ["Start / stop recording", "Latest recording", "Transcribe a recording...", "Open recordings", ""
+    items := ["Open Meeting Recorder", "", "Start / stop recording", "Latest recording", "Transcribe a recording...", "Open recordings", ""
         , "Settings", "Help", "About Meeting Recorder", "", "Repair audio backend", "Exit"]
     Check(Join(MenuLabels(m.Handle)) = Join(items), "Tray menu was: " Join(MenuLabels(m.Handle)))
+    Check(DllCall("GetMenuDefaultItem", "Ptr", m.Handle, "UInt", 1, "UInt", 0, "Int") = 0, "Open Meeting Recorder is not the default (click) item")
+    Check(RegExMatch(FileRead(Root "\MeetingRecorder.ahk", "UTF-8"), "m)^A_TrayMenu\.ClickCount := 1\s*$"), "A single click on the tray icon must open the panel")
     titles := []
     for topic in HelpTopics()
         titles.Push(topic.title)
-    help := DllCall("GetSubMenu", "Ptr", m.Handle, "Int", 6, "Ptr")
+    help := DllCall("GetSubMenu", "Ptr", m.Handle, "Int", 8, "Ptr")
     Check(help && Join(MenuLabels(help)) = Join(titles), "Help submenu was: " (help ? Join(MenuLabels(help)) : "(none)"))
 
     Check(TrayStatusText("", 0) = "", "Idle must show no status line")
@@ -448,6 +453,144 @@ TestAppIcon() {
     }
 }
 
+; #9: the windows looked broken: an empty half beside the panel buttons, a big gap above the
+; Recording saved buttons, a folder box that wrapped with scroll arrows, buttons not where Windows
+; puts them. Build each window as the user gets it and check what would show on screen.
+TestWindowLayout() {
+    wav := "C:\Rec\2026-11-13 082847 - Weekly planning with the product team and the design group - BFA76E00.wav"
+    windows := []
+    windows.Push(["Panel", MakePanel()])
+    p := MakePanel()
+    p["Settings"].Visible := false, p["NotNow"].Visible := true, p["NotNow"].Text := "Keep recording"
+    windows.Push(["Panel offering a call", p])
+    windows.Push(["Recording saved", MakeNotice(wav, "Saved", "")])
+    n := MakeNotice(wav, "Incomplete", "The microphone stopped working.")
+    n["TranscribeStatus"].Text := "Loading the speech model...  12 min. Click Hide to keep working."
+    n["TranscribeStatus"].Visible := true, n["TranscribeProgress"].Visible := true, n["Again"].Visible := true
+    n["Transcribe"].Text := "Open transcript"
+    LayoutNotice(n)
+    windows.Push(["Recording saved while transcribing", n])
+    windows.Push(["Settings", MakeSettings("C:\Users\someone\OneDrive - A Long Company Name\Documents\Meeting Recordings", "^!r", true, true, false)])
+    windows.Push(["Settings with Outlook", MakeSettings("C:\Rec", "^!r", true, true, true)])
+    windows.Push(["About", MakeAbout("1.2.3", Root "\MeetingRecorder.ico")])
+    for topic in HelpTopics()
+        windows.Push(["Help: " topic.title, MakeHelp(topic)])
+    try {
+        problems := ""
+        for w in windows {
+            try CheckLayout(w[1], w[2])
+            catch as e
+                problems .= "`n      " e.Message
+        }
+        if DllCall("GetWindowLong", "Ptr", windows[5][2]["Folder"].Hwnd, "Int", -16, "Int") & 0x4
+            problems .= "`n      Settings: the folder box must be one line"
+        Check(problems = "", SubStr(problems, 8))
+    } finally {
+        for w in windows
+            w[2].Destroy()
+    }
+}
+
+; What the user sees in a window: margins the same all round, nothing overlapping, no row
+; further than 20 px from the next, no text cut off, and the buttons at the bottom right.
+CheckLayout(name, g) {
+    g.Show("Hide AutoSize")
+    g.GetClientPos(, , &cw, &ch)
+    boxes := []
+    for c in g {
+        if !c.Visible
+            continue
+        c.GetPos(&x, &y, &w, &h)
+        boxes.Push({c: c, x: x, y: y, r: x + w, b: y + h})
+        Check(TextFits(c), name ": text is cut off in " c.Type " '" c.Text "'")
+    }
+    left := top := 9999, right := bottom := 0
+    for b in boxes
+        left := Min(left, b.x), top := Min(top, b.y), right := Max(right, b.r), bottom := Max(bottom, b.b)
+    Check(left >= 8 && top >= 8, name ": controls touch the window edge")
+    Check(Abs((cw - right) - left) <= 3, Format("{}: margin is {} on the left but {} on the right", name, left, cw - right))
+    Check(Abs((ch - bottom) - top) <= 3, Format("{}: margin is {} at the top but {} at the bottom", name, top, ch - bottom))
+    for a in boxes
+        for b in boxes
+            if a !== b && a.x < b.r && b.x < a.r && a.y < b.b && b.y < a.b
+                Check(false, name ": '" a.c.Text "' overlaps '" b.c.Text "'")
+    ; Rows: controls whose heights overlap. Then the gap between one row and the next.
+    rows := []
+    for b in SortBy(boxes, "y") {
+        if rows.Length && b.y < rows[-1].b {
+            rows[-1].b := Max(rows[-1].b, b.b), rows[-1].items.Push(b)
+        } else rows.Push({y: b.y, b: b.b, items: [b]})
+    }
+    loop rows.Length - 1
+        Check(rows[A_Index + 1].y - rows[A_Index].b <= 20, Format("{}: {} px of empty space above '{}'", name, rows[A_Index + 1].y - rows[A_Index].b, rows[A_Index + 1].items[1].c.Text))
+    last := rows[-1].items
+    edge := 0
+    for b in last {
+        Check(b.c.Type = "Button", name ": the bottom row must hold only buttons, found '" b.c.Text "'")
+        Check(b.y = last[1].y && b.b = last[1].b, name ": buttons in the bottom row are not lined up")
+        edge := Max(edge, b.r)
+    }
+    Check(Abs(edge - right) <= 1, name ": the last button does not line up with the right edge")
+}
+; True when the control's text fits in it at its own font.
+TextFits(c) {
+    if c.Type != "Text" && c.Type != "Button" && c.Type != "CheckBox" && c.Type != "Link"
+        return true
+    style := DllCall("GetWindowLong", "Ptr", c.Hwnd, "Int", -16, "Int")
+    if c.Type = "Text" && (style & 0x1F) >= 3   ; icon or picture
+        return true
+    text := c.Type = "Link" ? RegExReplace(c.Text, "<[^>]+>") : c.Text
+    rect := Buffer(16, 0)
+    DllCall("GetClientRect", "Ptr", c.Hwnd, "Ptr", rect)
+    w := NumGet(rect, 8, "Int"), h := NumGet(rect, 12, "Int")
+    pad := c.Type = "Button" ? Round(16 * A_ScreenDPI / 96) : c.Type = "CheckBox" ? Round(20 * A_ScreenDPI / 96) : 0
+    hdc := DllCall("GetDC", "Ptr", c.Hwnd, "Ptr")
+    old := DllCall("SelectObject", "Ptr", hdc, "Ptr", SendMessage(0x31, 0, 0, c), "Ptr")
+    calc := Buffer(16, 0)
+    NumPut("Int", w - pad, calc, 8)
+    single := c.Type != "Text" && c.Type != "Link"
+    DllCall("DrawTextW", "Ptr", hdc, "Str", text, "Int", -1, "Ptr", calc, "UInt", 0x400 | 0x800 | (single ? 0x20 : 0x10))
+    DllCall("SelectObject", "Ptr", hdc, "Ptr", old)
+    DllCall("ReleaseDC", "Ptr", c.Hwnd, "Ptr", hdc)
+    needW := NumGet(calc, 8, "Int"), needH := NumGet(calc, 12, "Int")
+    if c.Type = "Text" && style & 0xC000   ; ends in ... when too long: one line is enough
+        return needH <= h || h >= Round(16 * A_ScreenDPI / 96)
+    return needW <= w - pad && needH <= h
+}
+SortBy(list, key) {
+    sorted := []
+    for item in list {
+        i := sorted.Length
+        while i >= 1 && sorted[i].%key% > item.%key%
+            i--
+        sorted.InsertAt(i + 1, item)
+    }
+    return sorted
+}
+
+; #9: "Manual only" and "Preparing audio backend" meant nothing to users, and the Recording saved
+; window showed the raw file name with its time stamp and id.
+TestPlainWords() {
+    for state in ["Installing", "Manual only", "Starting", "Saving"] {
+        v := PanelLines(state, "Ctrl + Alt + R")
+        Check(!RegExMatch(v.status v.hint, "i)manual only|backend|capture"), state " shows jargon: " v.status " / " v.hint)
+    }
+    v := PanelLines("Manual only", "Ctrl + Alt + R")
+    Check(v.status = "Ready to record" && v.hint = "Start or stop: Ctrl + Alt + R", "Ready panel says: " v.status " / " v.hint)
+    stamp := "20261113082847"
+    when := FormatTime(stamp, "LongDate") ", " FormatTime(stamp, "HH:mm")
+    cases := [
+        ["C:\Rec\2026-11-13 082847 - Weekly planning - BFA76E00.wav", "Weekly planning", when],
+        ["C:\Rec\2026-11-13 082847 - Recording - BFA76E00 - Incomplete.wav", "Recording", when],
+        ["C:\Rec\2026-11-13 082847 - Budget - Q4 - 0A1B2C3D - Recovered incomplete.wav", "Budget - Q4", when],
+        ["C:\Rec\my interview.wav", "my interview", ""],
+    ]
+    for c in cases {
+        t := RecordingTitle(c[1])
+        Check(t.name = c[2] && t.when = c[3], c[1] " showed '" t.name "' / '" t.when "'")
+    }
+}
+
 ; ---------------------------------------------------------------- helpers
 
 ; Labels of a menu as the user sees them, by position; separators are "".
@@ -477,6 +620,7 @@ ShowAbout(*) => 0
 Repair(*) => 0
 Quit(*) => 0
 ShowTranscribing(*) => 0
+ShowPanel(*) => 0
 
 Out(text) => FileAppend(text "`n", "*", "UTF-8")
 Q(s) => '"' s '"'
