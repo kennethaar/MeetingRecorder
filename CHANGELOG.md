@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0 - 2026-11-13
+
+- Tray menu: Recordings lists your 8 newest recordings, so you can open an
+  older one, not just the latest. It shows when each was recorded and if it
+  has a transcript. Other recording... opens any earlier one (#11).
+
 ## 0.5.0 - 2026-11-13
 
 - Transcribe a recording: Names from the Outlook meeting are spelled right in

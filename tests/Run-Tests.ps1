@@ -15,7 +15,7 @@ $functions = 'HelpTopics', 'TeamsCallActive', 'RegQword', 'PickMeeting', 'ComDat
     'TranscribeCommand', 'ReadSegments', 'WriteTranscript', 'NoticeView', 'RecordingKind', 'BuildTrayMenu',
     'TrayStatusText', 'SetTrayStatus', 'HelpText', 'AboutText', 'MakePanel', 'MakeNotice', 'LayoutNotice',
     'MakeSettings', 'MakeHelp', 'MakeAbout', 'PanelLines', 'RecordingTitle', 'FitHeight',
-    'SaveMeetingHint', 'MeetingHint'
+    'SaveMeetingHint', 'MeetingHint', 'BuildRecordingsMenu', 'RecentRecordings', 'RecentLabel'
 $code = foreach ($name in $functions) {
     $m = [regex]::Match($app, "(?ms)^$name\([^)\r\n]*\) \{.*?^\}")
     if ($m.Success) { $m.Value } else { "$name(*) {`n    throw Error(`"No $name() function in MeetingRecorder.ahk`")`n}" }

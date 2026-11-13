@@ -1,6 +1,9 @@
 #Requires AutoHotkey v2.0
 #NoTrayIcon
 #SingleInstance Off
+; A warning dialog would hang the run; print warnings instead.
+#Warn All, StdOut
+#Warn LocalSameAsGlobal, Off
 ; Run-Tests.ps1 copies the app functions the tests call out of MeetingRecorder.ahk to this temp file.
 #Include %A_Temp%\MeetingRecorder-tests\AppFunctions.ahk
 #Include %A_ScriptDir%\..\WhatsNew.generated.ahk
@@ -28,6 +31,7 @@ Tests := [
     ["A recording is transcribed on this PC into Others and Me (#7)", TestTranscribeSpeech],
     ["Recording saved window says what is new and offers to transcribe again (#8)", TestNoticeView],
     ["Tray menu shows transcribing, recordings, Help and About (#8)", TestTrayMenu],
+    ["Tray menu › Recordings lists the newest recordings to open (#11)", TestRecentRecordings],
     ["Help and About windows show the topic and the version (#8)", TestHelpAndAbout],
     ["App icon is used on the tray, windows and toasts (#8)", TestAppIcon],
     ["Every window is laid out cleanly: no clipped text, gaps or stray buttons (#9)", TestWindowLayout],
@@ -446,7 +450,7 @@ TestNoticeView() {
 TestTrayMenu() {
     m := Menu()
     BuildTrayMenu(m)
-    items := ["Open Meeting Recorder", "", "Start / stop recording", "Latest recording", "Transcribe a recording...", "Open recordings", ""
+    items := ["Open Meeting Recorder", "", "Start / stop recording", "Recordings", "Open recordings folder", ""
         , "Settings", "Help", "About Meeting Recorder", "", "Repair audio backend", "Exit"]
     Check(Join(MenuLabels(m.Handle)) = Join(items), "Tray menu was: " Join(MenuLabels(m.Handle)))
     Check(DllCall("GetMenuDefaultItem", "Ptr", m.Handle, "UInt", 1, "UInt", 0, "Int") = 0, "Open Meeting Recorder is not the default (click) item")
@@ -454,7 +458,7 @@ TestTrayMenu() {
     titles := []
     for topic in HelpTopics()
         titles.Push(topic.title)
-    help := DllCall("GetSubMenu", "Ptr", m.Handle, "Int", 8, "Ptr")
+    help := DllCall("GetSubMenu", "Ptr", m.Handle, "Int", 7, "Ptr")
     Check(help && Join(MenuLabels(help)) = Join(titles), "Help submenu was: " (help ? Join(MenuLabels(help)) : "(none)"))
 
     Check(TrayStatusText("", 0) = "", "Idle must show no status line")
@@ -469,6 +473,51 @@ TestTrayMenu() {
     Check(Join(MenuLabels(m.Handle)) = Join(items), "After done: " Join(MenuLabels(m.Handle)))
     SetTrayStatus(m, "")
     Check(Join(MenuLabels(m.Handle)) = Join(items), "Removing twice changed the menu: " Join(MenuLabels(m.Handle)))
+}
+
+; #11: only the latest recording could be opened. Tray menu › Recordings lists the 8 newest
+; saved recordings, newest first, with when, the meeting name and whether it has a transcript,
+; then Other recording... for any older one.
+TestRecentRecordings() {
+    dir := A_Temp "\MeetingRecorder-tests\recent"
+    try DirDelete(dir, true)
+    DirCreate(dir)
+    try {
+        now := "20261113150000"
+        files := ["2026-11-13 140200 - Weekly sync - 0000000A.wav", "2026-11-13 140200 - Weekly sync - 0000000A.txt"
+            , "2026-11-13 150000 - Recording - 0000000F.partial.wav"
+            , "2026-11-13 093000 - Recording - 0000000B - Incomplete.wav"
+            , "2026-11-12 110000 - Budget & plan - 0000000C.wav", "2026-11-12 110000 - Budget & plan - 0000000E.wav"
+            , "2026-11-10 151500 - 1-1 Anna - 0000000D.wav"
+            , "2026-10-02 100000 - Retro - 00000010.wav", "2026-10-01 100000 - Kickoff - 00000011.wav"
+            , "2025-12-01 083000 - Old review - 00000012.wav", "2025-11-30 083000 - Too old - 00000013.wav"
+            , "notes.wav", "notes.txt"]
+        for f in files
+            FileAppend("", dir "\" f)
+        FileSetTime("20261113120000", dir "\notes.wav")
+        sub := Menu()
+        BuildRecordingsMenu(sub, dir, now)
+        expected := ["Today 14:02 - Weekly sync`tTranscript", "Today 12:00 - notes`tTranscript", "Today 09:30 - Recording"
+            , "Yesterday 11:00 - Budget && plan", "Yesterday 11:00 - Budget && plan (2)"
+            , FormatTime("20261110", "ddd") " 15:15 - 1-1 Anna"
+            , FormatTime("20261002", "d MMM") " 10:00 - Retro", FormatTime("20261001", "d MMM") " 10:00 - Kickoff"
+            , "", "Other recording..."]
+        Check(Join(MenuLabels(sub.Handle)) = Join(expected), "Recordings menu was: " Join(MenuLabels(sub.Handle)))
+
+        FileAppend("", dir "\2026-11-13 145900 - Standup - 00000014.wav")
+        BuildRecordingsMenu(sub, dir, now)
+        Check(MenuLabels(sub.Handle)[1] = "Today 14:59 - Standup" && MenuLabels(sub.Handle).Length = 10
+            , "After a new recording, the menu was: " Join(MenuLabels(sub.Handle)))
+
+        BuildRecordingsMenu(sub, dir "\missing", now)
+        Check(Join(MenuLabels(sub.Handle)) = Join(["No recordings yet", "", "Other recording..."]), "Empty folder: " Join(MenuLabels(sub.Handle)))
+        state := DllCall("GetMenuState", "Ptr", sub.Handle, "UInt", 0, "UInt", 0x400, "UInt")
+        Check(state & 0x3, "No recordings yet must be greyed out")
+
+        Check(InStr(FormatTime("20251201", "d MMM yyyy"), "2025") && RecentLabel(dir "\2025-12-01 083000 - Old review - 00000012.wav", now)
+            = FormatTime("20251201", "d MMM yyyy") " 08:30 - Old review", "A recording from last year must show its year")
+    } finally
+        try DirDelete(dir, true)
 }
 
 ; #8: Help opens a topic from the tray menu; About says which version this is.
@@ -664,8 +713,8 @@ Join(list) {
 }
 ; Stand-ins for the app's menu commands, so BuildTrayMenu() can be built here.
 Toggle(*) => 0
-ShowLatest(*) => 0
 PickRecording(*) => 0
+OpenRecording(*) => 0
 OpenFolder(*) => 0
 Settings(*) => 0
 ShowHelp(*) => 0

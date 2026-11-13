@@ -3,7 +3,7 @@
 Persistent
 ; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
 TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
-AppVersion := "0.5.0"
+AppVersion := "0.6.0"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -43,6 +43,7 @@ Panel.OnEvent("Close", (*) => Offering ? EndOffer() : Panel.Hide())
 OnMessage(0x0010, PreventRecordingClose)
 OnMessage(0x0232, RememberPosition)
 OnMessage(0x0218, PowerEvent)
+OnMessage(0x0404, TrayIconEvent)
 OnExit(ExitHandler)
 A_TrayMenu.Delete()
 BuildTrayMenu(A_TrayMenu)
@@ -339,30 +340,84 @@ HideNotice(*) {
 NoticeBox(text,title,options:="") {
  return MsgBox(text,title,options " 0x40000")
 }
-ShowLatest(*) {
- global Latest
- if Latest != "" && FileExist(Latest)
-  OpenNotice(Latest,RecordingKind(Latest))
- else NoticeBox("No saved recording is available yet.","Meeting Recorder")
-}
 ShowInExplorer(wav) {
  if FileExist(wav)
   Run("explorer.exe /select," Q(wav))
  else NoticeBox("The recording is no longer in its folder.","Meeting Recorder")
 }
-; Tray menu › Transcribe a recording...: any saved recording, also an older one.
+; Tray menu › Recordings › Other recording...: any saved recording, also an older one (#11).
 PickRecording(*) {
  global Folder
- path := FileSelect(1,Folder "\","Transcribe a recording","Recordings (*.wav)")
+ path := FileSelect(1,Folder "\","Open a recording","Recordings (*.wav)")
  if path = ""
   return
  if RegExMatch(path,"i)\.partial\.wav$") {
-  NoticeBox("This recording is still being made. Transcribe it when it is saved.","Transcribe")
+  NoticeBox("This recording is still being made. Open it when it is saved.","Meeting Recorder")
   return
  }
- OpenNotice(path,RecordingKind(path))
- if NoticeTx() = ""
-  StartChecked(path)
+ OpenRecording(path)
+}
+OpenRecording(wav,*) {
+ if FileExist(wav)
+  OpenNotice(wav,RecordingKind(wav))
+ else NoticeBox("The recording is no longer in its folder.","Meeting Recorder")
+}
+; Tray menu › Recordings: the 8 newest saved recordings, newest first, then Other recording... (#11).
+BuildRecordingsMenu(sub,folder,now:="") {
+ sub.Delete()
+ used := Map()
+ for wav in RecentRecordings(folder,8) {
+  label := StrReplace(RecentLabel(wav,now),"&","&&")
+  n := 1
+  while used.Has(label (n > 1 ? " (" n ")" : ""))
+   n++
+  label .= n > 1 ? " (" n ")" : ""
+  used[label] := true
+  sub.Add(label (FileExist(TranscriptPath(wav,"txt")) ? "`tTranscript" : ""),OpenRecording.Bind(wav))
+ }
+ if !used.Count {
+  sub.Add("No recordings yet",(*) => 0)
+  sub.Disable("No recordings yet")
+ }
+ sub.Add()
+ sub.Add("Other recording...",PickRecording)
+}
+; Saved recordings in the folder, newest first: by the time in the name, else when last changed.
+RecentRecordings(folder,count) {
+ list := ""
+ if folder = ""
+  return []
+ loop files folder "\*.wav" {
+  if RegExMatch(A_LoopFileName,"i)\.partial\.wav$")
+   continue
+  stamp := RegExMatch(A_LoopFileName,"^(\d{4})-(\d\d)-(\d\d) (\d{6}) - ",&m) && IsTime(m[1] m[2] m[3] m[4])
+   ? m[1] m[2] m[3] m[4] : A_LoopFileTimeModified
+  list .= stamp "`t" A_LoopFileFullPath "`n"
+ }
+ recent := []
+ for line in StrSplit(Sort(RTrim(list,"`n"),"R"),"`n") {
+  if line = "" || recent.Length >= count
+   break
+  recent.Push(SubStr(line,InStr(line,"`t")+1))
+ }
+ return recent
+}
+; "Today 14:02 - Weekly sync": the day (Today, Yesterday, weekday, date), the time and the name.
+RecentLabel(wav,now:="") {
+ now := now = "" ? A_Now : now
+ SplitPath(wav,&file)
+ stamp := RegExMatch(file,"^(\d{4})-(\d\d)-(\d\d) (\d{6}) - ",&m) && IsTime(m[1] m[2] m[3] m[4])
+  ? m[1] m[2] m[3] m[4] : FileGetTime(wav,"M")
+ days := DateDiff(SubStr(now,1,8),SubStr(stamp,1,8),"Days")
+ day := days = 0 ? "Today" : days = 1 ? "Yesterday" : days > 1 && days < 7 ? FormatTime(stamp,"ddd")
+  : SubStr(stamp,1,4) = SubStr(now,1,4) ? FormatTime(stamp,"d MMM") : FormatTime(stamp,"d MMM yyyy")
+ return day " " FormatTime(stamp,"HH:mm") " - " RecordingTitle(wav).name
+}
+; Fills Recordings again just before the tray menu opens, so it shows what is in the folder now.
+TrayIconEvent(wParam,lParam,*) {
+ global RecentMenu, Folder
+ if lParam = 0x205 || lParam = 0x7B
+  BuildRecordingsMenu(RecentMenu,Folder)
 }
 ShowTranscribing(*) {
  global Completion, CompletionWav, TxWav
@@ -375,9 +430,10 @@ BuildTrayMenu(m) {
  m.Default := "Open Meeting Recorder"
  m.Add()
  m.Add("Start / stop recording",Toggle)
- m.Add("Latest recording",ShowLatest)
- m.Add("Transcribe a recording...",PickRecording)
- m.Add("Open recordings",OpenFolder)
+ global RecentMenu := Menu()
+ BuildRecordingsMenu(RecentMenu,"")
+ m.Add("Recordings",RecentMenu)
+ m.Add("Open recordings folder",OpenFolder)
  m.Add()
  m.Add("Settings",Settings)
  help := Menu()
@@ -1045,7 +1101,7 @@ HelpTopics() {
                 "Click Transcribe when a recording is saved.",
                 "Click Hide to keep working. The tray icon shows how far it has come.",
                 "Click Open transcript when it is ready.",
-                "For an older recording, use Transcribe a recording in the tray menu.",
+                "For an older recording, choose it under Recordings in the tray menu.",
             ],
             keys: [],
             legend: [
@@ -1059,21 +1115,21 @@ HelpTopics() {
                 ["Saved.Hide", "Hide. Transcribing goes on."],
             ],
             view: "Saved",
-            more: "Others is what you heard. Me is your microphone. Transcribe again replaces the transcript you have. To get this window back, choose Latest recording in the tray menu. The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. A pause of 2 seconds starts a new paragraph with its own time. If the recording is named after an Outlook meeting, its title and the names of the people invited help spell names right. They are kept in %LOCALAPPDATA%\MeetingRecorder\meetings.ini. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. A long meeting can take about as long to transcribe as it lasted. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
+            more: "Others is what you heard. Me is your microphone. Transcribe again replaces the transcript you have. To get this window back, choose the recording under Recordings in the tray menu. The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. A pause of 2 seconds starts a new paragraph with its own time. If the recording is named after an Outlook meeting, its title and the names of the people invited help spell names right. They are kept in %LOCALAPPDATA%\MeetingRecorder\meetings.ini. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. A long meeting can take about as long to transcribe as it lasted. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
         },
         {
             id: "tray",
             title: "Tray menu",
-            words: "tray icon menu notification area clock red dot open panel show window latest recording help about version progress",
+            words: "tray icon menu notification area clock red dot open panel show window latest older earlier recent recordings help about version progress",
             what: "The red dot in the notification area, by the clock, is the app. Click it to open the panel. Right-click it for everything else.",
             steps: [
                 "Click the red dot to open the panel, or right-click it for the menu.",
-                "Choose Latest recording to see the last recording and its transcript.",
+                "Point to Recordings and choose one to see it and its transcript.",
                 "Choose Help to read a topic, or About to see the version.",
             ],
             keys: [],
             legend: [],
-            more: "While a recording is transcribed, the top line of the menu shows how far it has come. Click it to see the transcript window. If the red dot is hidden, click the arrow by the clock.",
+            more: "Recordings lists the 8 newest recordings, newest first. Transcript at the right means it has one. For an older one, choose Other recording. While a recording is transcribed, the top line of the menu shows how far it has come. Click it to see the transcript window. If the red dot is hidden, click the arrow by the clock.",
         },
         {
             id: "recovery",
@@ -1082,7 +1138,7 @@ HelpTopics() {
             what: "If the app or PC stopped during a recording, the audio is rescued the next time the app starts.",
             steps: [
                 "Start Meeting Recorder.",
-                "Right-click the tray icon and choose Open recordings.",
+                "Right-click the tray icon and choose Open recordings folder.",
                 "Look for files that end in Recovered incomplete.",
             ],
             keys: [],
