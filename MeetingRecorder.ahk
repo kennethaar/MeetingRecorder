@@ -3,7 +3,7 @@
 Persistent
 ; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
 TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
-AppVersion := "0.7.0"
+AppVersion := "0.7.1"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -1154,8 +1154,8 @@ HelpTopics() {
         {
             id: "record",
             title: "Record a meeting",
-            words: "start stop record call meeting audio shortcut panel timer microphone",
-            what: "Records your call to a WAV file. The left channel is what you hear. The right channel is your microphone.",
+            words: "start stop record call meeting audio shortcut panel timer microphone speaker headset sound others silent",
+            what: "Records your call to a WAV file. The left channel is what you hear, from every speaker and headset that is on. The right channel is your microphone.",
             steps: [
                 "Press Ctrl + Alt + R, or click Start.",
                 "Wait until the timer runs. Then the recording has begun.",

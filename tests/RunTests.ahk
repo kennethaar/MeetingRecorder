@@ -21,6 +21,7 @@ Tests := [
     ["In-app changelog copy is current", TestWhatsNewCurrent],
     ["Recovery repairs partial recordings", TestRecovery],
     ["Audio backend setup reaches Ready on .NET 4.8 (#4)", TestBackendSetup],
+    ["Others is recorded from whichever speaker plays the call (#13)", TestOthersFromAnySpeaker],
     ["Teams call is found from microphone use (#5)", TestTeamsDetection],
     ["Recording is named after the meeting running now (#5)", TestMeetingName],
     ["Outlook dates are read in any locale (#5)", TestComDate],
@@ -201,6 +202,79 @@ TestBackendSetup() {
         EnvSet("LOCALAPPDATA", oldAppData)
         try FileDelete(status)
     }
+}
+
+; Bug #13: Others was recorded only from the Windows default communication output. Teams played
+; the call on the laptop speakers while that default was a headset, so Others was silent for a
+; whole meeting. Records while a quiet tone plays on each active output device in turn; Others
+; must hear it every time. Fails for the right reason only with two or more output devices.
+TestOthersFromAnySpeaker() {
+    appData := A_Temp "\MeetingRecorder-tests\appdata"
+    deps := appData "\MeetingRecorder\backend-2.2.1"
+    tmp := A_Temp "\MeetingRecorder-tests\speakers-" A_TickCount
+    DirCreate(tmp)
+    oldAppData := EnvGet("LOCALAPPDATA")
+    pid := 0
+    try {
+        EnvSet("LOCALAPPDATA", appData)
+        RunWait(PowerShell() " -File " Q(Root "\Backend.ps1") " -Mode Setup", , "Hide")
+        list := RunOut(PowerShell() " -File " Q(Root "\tests\Play-Tone.ps1") " -Deps " Q(deps))
+        speakers := []
+        loop parse Trim(list, "`r`n"), "`n", "`r"
+            if RegExMatch(A_LoopField, "^(\S+)`t(.+)$", &m)
+                speakers.Push({id: m[1], name: m[2]})
+        Check(speakers.Length, "No output devices found:`n" list)
+        for s in speakers {
+            status := tmp "\status" A_Index ".ini", stop := tmp "\stop" A_Index ".signal"
+            wav := tmp "\rec" A_Index ".partial.wav"
+            Run(PowerShell() " -File " Q(Root "\Backend.ps1") " -Mode Record -Output " Q(wav) " -Status " Q(status)
+                . " -Stop " Q(stop) " -ParentId " DllCall("GetCurrentProcessId"), , "Hide", &pid)
+            state := WaitState(status, "Recording", 30000)
+            Check(state = "Recording", s.name ": recording did not start: " state " " IniRead(status, "Capture", "Detail", ""))
+            RunWait(PowerShell() " -File " Q(Root "\tests\Play-Tone.ps1") " -Deps " Q(deps) " -Device " Q(s.id) " -Seconds 2", , "Hide")
+            FileAppend("", stop)
+            state := WaitState(status, "Saved", 15000)
+            Check(state = "Saved", s.name ": recording was not saved: " state " " IniRead(status, "Capture", "Detail", ""))
+            peak := ChannelPeak(StrReplace(wav, ".partial.wav", ".wav"), 0)
+            Check(peak > 1000, "Others was silent (peak " peak ") while " s.name " played a tone")
+        }
+    } finally {
+        EnvSet("LOCALAPPDATA", oldAppData)
+        if pid && ProcessExist(pid)
+            ProcessClose(pid)
+        try DirDelete(tmp, true)
+    }
+}
+
+WaitState(status, want, ms) {
+    start := A_TickCount, state := "(no status)"
+    while A_TickCount - start < ms {
+        try state := IniRead(status, "Capture", "State", "(no status)")
+        if state = want || state = "Error"
+            break
+        Sleep(200)
+    }
+    return state
+}
+
+; Highest absolute sample on one channel (0 = left = Others, 1 = right = Me) of a 16-bit stereo WAV.
+ChannelPeak(file, channel) {
+    data := FileRead(file, "RAW")
+    peak := 0
+    loop (data.Size - 44) // 4 {
+        v := Abs(NumGet(data, 44 + (A_Index - 1) * 4 + channel * 2, "Short"))
+        if v > peak
+            peak := v
+    }
+    return peak
+}
+
+RunOut(cmd) {
+    out := A_Temp "\MeetingRecorder-tests\out-" A_TickCount ".txt"
+    RunWait(A_ComSpec ' /c "' cmd ' > ' Q(out) ' 2>&1"', , "Hide")
+    text := FileRead(out, "UTF-8")
+    FileDelete(out)
+    return text
 }
 
 ; Windows notes microphone use per app; LastUsedTimeStop = 0 means the app is using it now.

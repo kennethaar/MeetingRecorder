@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.1 - 2026-11-14
+
+- Record a meeting: What others say is now recorded from every speaker and
+  headset that is on, not only from the Windows default one. Before, a call
+  played on the laptop speakers while a headset was connected was saved
+  silent (#13).
+
 ## 0.7.0 - 2026-11-13
 
 - Transcribe a recording: If transcribing stops, Try again picks up where it
