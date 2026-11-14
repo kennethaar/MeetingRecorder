@@ -120,7 +120,7 @@ def write_part(path, language, rows):
     os.replace(tmp, path)
 
 
-def main(wav, status, out, hint="", model_name="large-v3"):
+def main(wav, status, out, hint="", model_name="large-v3-turbo"):
     log = open(status + ".log", "w", encoding="utf-8", buffering=1)
     sys.stdout = sys.stderr = log
     try:

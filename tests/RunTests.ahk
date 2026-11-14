@@ -24,6 +24,7 @@ Tests := [
     ["Others is recorded from whichever speaker plays the call (#13)", TestOthersFromAnySpeaker],
     ["Settings lets you pick the microphone and shows how loud it is (#14)", TestMicSettings],
     ["Recording uses the chosen microphone, or the Windows default when it is missing (#14)", TestMicRecording],
+    ["Settings lets you pick the speech model, Fast by default, and Transcribe uses it (#15)", TestModelSettings],
     ["Teams call is found from microphone use (#5)", TestTeamsDetection],
     ["Recording is named after the meeting running now (#5)", TestMeetingName],
     ["Outlook dates are read in any locale (#5)", TestComDate],
@@ -296,6 +297,26 @@ TestMicSettings() {
     }
 }
 
+; #15: large-v3 was slow and ran out of memory; turbo was twice as fast and missed fewer words.
+; Fast (turbo) is the default; Accurate (large-v3) stays for meetings in other languages.
+TestModelSettings() {
+    fast := "Fast - best for English", accurate := "Accurate - slower, best for other languages"
+    cases := [["", fast, "large-v3-turbo"], ["large-v3-turbo", fast, "large-v3-turbo"], ["large-v3", accurate, "large-v3"]]
+    for c in cases {
+        g := MakeSettings("C:\Rec", "^!r", true, true, false, "", "", "", c[1])
+        try {
+            items := ControlGetItems(g["Model"])
+            Check(items.Length = 2 && items[1] = fast && items[2] = accurate, "Transcribe with must offer Fast, then Accurate")
+            Check(g["Model"].Text = c[2], "Stored '" c[1] "' shows '" g["Model"].Text "', expected '" c[2] "'")
+            Check(ModelChoice(g) = c[3], "Save would keep '" ModelChoice(g) "', expected '" c[3] "'")
+        } finally g.Destroy()
+    }
+    cmd := TranscribeCommand("py.exe", "C:\App", "C:\Rec\a.wav", "s.ini", "t.tsv", "Budget.", "large-v3")
+    Check(SubStr(cmd, -11) = ' "large-v3"', "The model must be the last argument: " cmd)
+    cmd := TranscribeCommand("py.exe", "C:\App", "C:\Rec\a.wav", "s.ini", "t.tsv")
+    Check(SubStr(cmd, -17) = ' "large-v3-turbo"', "Without a choice, Transcribe must use turbo: " cmd)
+}
+
 TestMicRecording() {
     real := MicList()
     RegExMatch(real[1].name, "^Windows default \((.+)\)$", &d)
@@ -524,7 +545,7 @@ TestMeetingHint() {
         long := MeetingHint(ini, "C:\Rec\x - Town hall - 2a2b3c4d.wav")
         Check(StrLen(long) <= 400 && InStr(long, "Town hall. Person Number1, "), "A long attendee list must be cut to 400 characters, got " StrLen(long))
         cmd := TranscribeCommand("py.exe", "C:\App", wav, "s.ini", "t.tsv", hint)
-        Check(SubStr(cmd, -StrLen(hint) - 1) = ' "Weekly sync. Kari Nordmann, Øyvind Ås, Ola Hansen."', "The hint must be the last argument, without inner quotes: " cmd)
+        Check(InStr(cmd, ' "t.tsv" "Weekly sync. Kari Nordmann, Øyvind Ås, Ola Hansen." '), "The hint must follow the transcript file, without inner quotes: " cmd)
     } finally {
         try DirDelete(tmp, true)
     }

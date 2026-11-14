@@ -3,7 +3,7 @@
 Persistent
 ; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
 TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
-AppVersion := "0.8.0"
+AppVersion := "0.9.0"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -16,6 +16,8 @@ CalendarOn := IniRead(Config, "Settings", "Calendar", 1) = 1
 ; while it is not connected.
 Microphone := IniRead(Config, "Settings", "Microphone", "")
 MicrophoneName := IniRead(Config, "Settings", "MicrophoneName", "")
+; Speech model for Transcribe (#15): large-v3-turbo (Fast) or large-v3 (Accurate).
+SpeechModel := IniRead(Config, "Settings", "Model", "large-v3-turbo") = "large-v3" ? "large-v3" : "large-v3-turbo"
 InCall := false        ; a Teams call is using the microphone
 Offering := false      ; the panel offers to record that call
 CallEnded := false     ; the call ended while recording; the panel offers Stop or Keep recording
@@ -656,7 +658,7 @@ Settings(*) {
   return
  }
  ; Only offered when classic Outlook is installed; new Outlook has no local calendar access.
- g := MakeSettings(Folder,Shortcut,DetectOn,CalendarOn,OutlookInstalled(),MicList(),Microphone,MicrophoneName)
+ g := MakeSettings(Folder,Shortcut,DetectOn,CalendarOn,OutlookInstalled(),MicList(),Microphone,MicrophoneName,SpeechModel)
  open := g.Hwnd
  f := g["Folder"], h := g["Shortcut"], d := g["Detect"]
  c := 0
@@ -680,7 +682,7 @@ Settings(*) {
   g.Destroy()
  }
  SaveSettings(*) {
-  global Folder, Shortcut, Config, DetectOn, CalendarOn, Microphone, MicrophoneName
+  global Folder, Shortcut, Config, DetectOn, CalendarOn, Microphone, MicrophoneName, SpeechModel
   try {
    newKey := h.Value
    if newKey = ""
@@ -703,6 +705,8 @@ Settings(*) {
    Microphone := m.id, MicrophoneName := m.id = "" ? "" : m.name
    IniWrite(Microphone,Config,"Settings","Microphone")
    IniWrite(MicrophoneName,Config,"Settings","MicrophoneName")
+   SpeechModel := ModelChoice(g)
+   IniWrite(SpeechModel,Config,"Settings","Model")
    CloseSettings()
   } catch as e {
    MsgBox(e.Message,"Settings not saved")
@@ -710,7 +714,7 @@ Settings(*) {
  }
 }
 ; Folder with Browse beside it, the shortcut, the Teams choices, then Save and Cancel.
-MakeSettings(folder,shortcut,detect,calendar,outlook,mics := "",mic := "",micName := "") {
+MakeSettings(folder,shortcut,detect,calendar,outlook,mics := "",mic := "",micName := "",model := "") {
  ; Microphones (#14): a stored one that is not connected now stays listed, so Save keeps it.
  list := IsObject(mics) ? mics.Clone() : [{id: "", name: "Windows default"}]
  pick := 1
@@ -738,7 +742,10 @@ MakeSettings(folder,shortcut,detect,calendar,outlook,mics := "",mic := "",micNam
  g.AddDropDownList("vMicrophone y+4 w440 Choose" pick,names)
  g.AddProgress("vLevel y+8 w300 h10 Range0-100",0)
  g.AddText("vLevelHint x+8 yp-4 w132","Talk to test it")
- g.AddCheckbox("vDetect xm y+12 Checked" detect,"Offer to record when a Teams call starts")
+ ; Speech model (#15): Fast (turbo) unless Accurate (large-v3) is stored.
+ g.AddText("xm y+12 w440","Transcribe with")
+ g.AddDropDownList("vModel y+4 w440 Choose" (model = "large-v3" ? 2 : 1),["Fast - best for English","Accurate - slower, best for other languages"])
+ g.AddCheckbox("vDetect xm y+14 Checked" detect,"Offer to record when a Teams call starts")
  if outlook
   g.AddCheckbox("vCalendar y+8 Checked" calendar,"Name recordings after the meeting in classic Outlook")
  g.AddButton("vSave x264 y+18 w92 Default","Save")
@@ -852,6 +859,10 @@ MicMeterClose(m) {
 MicChoice(g) {
  return g.Mics[g["Microphone"].Value]
 }
+; The speech model picked in Settings (#15).
+ModelChoice(g) {
+ return g["Model"].Value = 2 ? "large-v3" : "large-v3-turbo"
+}
 BrowseFolder(ctrl) {
  p := DirSelect(ctrl.Value,3,"Recording folder")
  if p != ""
@@ -944,7 +955,7 @@ StartTranscribe(wav) {
    Run(PSCommand("Transcriber") " -Status " Q(TxSetupPath),, "Hide", &TxPid)
   } else {
    TxState := "Working", TxDetail := "Loading the speech model"
-   Run(TranscribeCommand(py, A_ScriptDir, wav, TxStatusPath, TxSegmentsPath, MeetingHint(AppDir "\meetings.ini", wav)),, "Hide", &TxPid)
+   Run(TranscribeCommand(py, A_ScriptDir, wav, TxStatusPath, TxSegmentsPath, MeetingHint(AppDir "\meetings.ini", wav), SpeechModel),, "Hide", &TxPid)
   }
  } catch as e {
   TranscribeFailed(e.Message)
@@ -1049,8 +1060,9 @@ FindTranscriber(appData) {
 }
 ; hint: meeting title and names for the speech model (#10). Quotes and backslashes would break
 ; the command line, so they are left out.
-TranscribeCommand(py, appDir, wav, status, segments, hint := "") {
- return Q(py) " -u " Q(appDir "\Transcribe.py") " " Q(wav) " " Q(status) " " Q(segments) " " Q(RegExReplace(hint,'["\\]'))
+; model: the speech model picked in Settings (#15).
+TranscribeCommand(py, appDir, wav, status, segments, hint := "", model := "large-v3-turbo") {
+ return Q(py) " -u " Q(appDir "\Transcribe.py") " " Q(wav) " " Q(status) " " Q(segments) " " Q(RegExReplace(hint,'["\\]')) " " Q(model)
 }
 TranscriptPath(wav, ext) {
  return RegExReplace(wav,"i)\.wav$") "." ext
@@ -1340,7 +1352,7 @@ HelpTopics() {
             id: "settings",
             title: "Settings",
             words: "settings folder shortcut hotkey save location options teams outlook calendar microphone mic headset level",
-            what: "Choose where recordings go, the keys that start and stop them, your microphone, and what happens in Teams calls.",
+            what: "Choose the folder, the shortcut, your microphone, the speech model and what happens in Teams calls.",
             steps: [
                 "Open Settings from the panel or tray menu.",
                 "Type a folder, or click Browse.",
@@ -1355,8 +1367,9 @@ HelpTopics() {
                 ["Settings.Shortcut", "Keys that start and stop"],
                 ["Settings.Microphone", "Your microphone"],
                 ["Settings.Level", "Moves when it hears you"],
+                ["Settings.Model", "Fast or accurate"],
                 ["Settings.Detect", "Offer to record Teams calls"],
-                ["?Settings.Calendar", "Name files after classic Outlook meetings"],
+                ["?Settings.Calendar", "Name files after Outlook meetings"],
                 ["Settings.Save", "Save changes"],
                 ["Settings.Cancel", "Close without saving"],
             ],
@@ -1366,7 +1379,7 @@ HelpTopics() {
         {
             id: "transcribe",
             title: "Transcribe a recording",
-            words: "transcribe transcript text subtitles srt whisper whisperx word notes minutes saved again redo older hide progress",
+            words: "transcribe transcript text subtitles srt whisper whisperx word notes minutes saved again redo older hide progress fast accurate model language",
             what: "Turns a saved recording into text on this PC. Nothing is uploaded. Lines are marked Others or Me.",
             steps: [
                 "Click Transcribe when a recording is saved.",
@@ -1387,7 +1400,7 @@ HelpTopics() {
                 ["Saved.Hide", "Hide. Transcribing goes on."],
             ],
             view: "Saved",
-            more: "Others is what you heard. Me is your microphone. Getting ready takes a few minutes, so the bar moves by itself until there is a percent. If transcribing stops, Try again picks up where it stopped: a finished part is kept. Transcribe again replaces the transcript you have. To get this window back, choose the recording under Recordings in the tray menu. The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. A pause of 2 seconds starts a new paragraph with its own time. If the recording is named after an Outlook meeting, its title and the names of the people invited help spell names right. They are kept in %LOCALAPPDATA%\MeetingRecorder\meetings.ini. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. A long meeting can take about as long to transcribe as it lasted. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
+            more: "Others is what you heard. Me is your microphone. Getting ready takes a few minutes, so the bar moves by itself until there is a percent. If transcribing stops, Try again picks up where it stopped: a finished part is kept. Transcribe again replaces the transcript you have. To get this window back, choose the recording under Recordings in the tray menu. The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. A pause of 2 seconds starts a new paragraph with its own time. If the recording is named after an Outlook meeting, its title and the names of the people invited help spell names right. They are kept in %LOCALAPPDATA%\MeetingRecorder\meetings.ini. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. Fast suits English and takes about as long as the meeting lasted. For a meeting in another language, pick Accurate under Transcribe with in Settings; it takes about twice as long and needs more memory. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
         },
         {
             id: "tray",

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0 - 2026-11-14
+
+- Transcribe a recording: Transcribing is about twice as fast and uses less
+  memory, with a speech model that also misses fewer words (#15).
+- Settings: Pick Fast or Accurate under Transcribe with. Accurate is slower
+  and suits meetings in other languages than English (#15).
+
 ## 0.8.0 - 2026-11-14
 
 - Settings: Pick the microphone that records you. A bar moves when it hears
