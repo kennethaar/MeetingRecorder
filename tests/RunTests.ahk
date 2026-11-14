@@ -22,6 +22,8 @@ Tests := [
     ["Recovery repairs partial recordings", TestRecovery],
     ["Audio backend setup reaches Ready on .NET 4.8 (#4)", TestBackendSetup],
     ["Others is recorded from whichever speaker plays the call (#13)", TestOthersFromAnySpeaker],
+    ["Settings lets you pick the microphone and shows how loud it is (#14)", TestMicSettings],
+    ["Recording uses the chosen microphone, or the Windows default when it is missing (#14)", TestMicRecording],
     ["Teams call is found from microphone use (#5)", TestTeamsDetection],
     ["Recording is named after the meeting running now (#5)", TestMeetingName],
     ["Outlook dates are read in any locale (#5)", TestComDate],
@@ -237,6 +239,89 @@ TestOthersFromAnySpeaker() {
             Check(state = "Saved", s.name ": recording was not saved: " state " " IniRead(status, "Capture", "Detail", ""))
             peak := ChannelPeak(StrReplace(wav, ".partial.wav", ".wav"), 0)
             Check(peak > 1000, "Others was silent (peak " peak ") while " s.name " played a tone")
+        }
+    } finally {
+        EnvSet("LOCALAPPDATA", oldAppData)
+        if pid && ProcessExist(pid)
+            ProcessClose(pid)
+        try DirDelete(tmp, true)
+    }
+}
+
+; #14: Windows moved its default microphone to a Bluetooth headset when it connected, so Me was
+; recorded from the headset while Teams used the Sennheiser. Settings must offer every connected
+; microphone, keep a choice that is not connected just now, and show a level bar.
+TestMicSettings() {
+    mics := [{id: "", name: "Windows default (Headset (Sudio C8))"}, {id: "{s}", name: "Sennheiser Profile"},
+        {id: "{m}", name: "Microphone Array (Intel)"}]
+    cases := [
+        ; stored id, stored name, what the dropdown shows, the items, what Save keeps
+        ["{s}", "Sennheiser Profile", "Sennheiser Profile", 3, "{s}"],
+        ["", "", "Windows default (Headset (Sudio C8))", 3, ""],
+        ["{gone}", "Poly headset", "Poly headset (not connected)", 4, "{gone}"],
+    ]
+    for c in cases {
+        g := MakeSettings("C:\Rec", "^!r", true, true, false, mics, c[1], c[2])
+        try {
+            items := ControlGetItems(g["Microphone"])
+            Check(items.Length = c[4], "Microphone list for '" c[1] "' has " items.Length " items, expected " c[4])
+            Check(items[1] = mics[1].name && items[-1] = mics[3].name, "Microphone list must start with Windows default and list each microphone")
+            Check(g["Microphone"].Text = c[3], "Microphone shows '" g["Microphone"].Text "', expected '" c[3] "'")
+            Check(g["Level"].Type = "Progress", "No level bar under the microphone")
+            Check(MicChoice(g).id = c[5], "Save would keep '" MicChoice(g).id "', expected '" c[5] "'")
+            if c[1] = "{gone}"
+                Check(MicChoice(g).name = "Poly headset", "A microphone that is not connected must keep its own name")
+            g["Microphone"].Value := items.Length
+            Check(MicChoice(g).id = "{m}", "Picking the last microphone must save it")
+            ; All microphones were muted in Windows and the bar just stayed still: say so.
+            ShowLevel(g, 0.5, false)
+            Check(g["Level"].Value = 50 && g["LevelHint"].Text = "Talk to test it", "Level 0.5 must fill half the bar, got " g["Level"].Value " '" g["LevelHint"].Text "'")
+            ShowLevel(g, 0, true)
+            Check(g["Level"].Value = 0 && g["LevelHint"].Text = "Muted in Windows", "A muted microphone must say 'Muted in Windows', got '" g["LevelHint"].Text "'")
+        } finally g.Destroy()
+    }
+    real := MicList()
+    Check(real.Length >= 1 && real[1].id = "" && RegExMatch(real[1].name, "^Windows default \(.+\)$"), "MicList must start with 'Windows default (<name>)'")
+    for m in real {
+        if A_Index > 1
+            Check(InStr(m.id, "{0.0.1.") = 1 && m.name != "", "Not a microphone: '" m.id "' '" m.name "'")
+        meter := MicMeterOpen(m.id)
+        try {
+            Sleep(100)
+            peak := MicMeterPeak(meter)
+            Check(peak >= 0 && peak <= 1, m.name ": level must be 0 to 1, got " peak)
+            muted := MicMuted(meter)
+            Check(muted == 0 || muted == 1, m.name ": muted must be true or false, got '" muted "'")
+        } finally MicMeterClose(meter)
+    }
+}
+
+TestMicRecording() {
+    real := MicList()
+    RegExMatch(real[1].name, "^Windows default \((.+)\)$", &d)
+    cases := [["{0.0.1.00000000}.{00000000-0000-0000-0000-000000000000}", d[1]]]
+    if real.Length >= 2
+        cases.Push([real[-1].id, real[-1].name])
+    appData := A_Temp "\MeetingRecorder-tests\appdata"
+    tmp := A_Temp "\MeetingRecorder-tests\mic-" A_TickCount
+    DirCreate(tmp)
+    oldAppData := EnvGet("LOCALAPPDATA")
+    pid := 0
+    try {
+        EnvSet("LOCALAPPDATA", appData)
+        RunWait(PowerShell() " -File " Q(Root "\Backend.ps1") " -Mode Setup", , "Hide")
+        for c in cases {
+            status := tmp "\status" A_Index ".ini", stop := tmp "\stop" A_Index ".signal"
+            Run(PowerShell() " -File " Q(Root "\Backend.ps1") " -Mode Record -Output " Q(tmp "\rec" A_Index ".partial.wav") " -Status " Q(status)
+                . " -Stop " Q(stop) " -ParentId " DllCall("GetCurrentProcessId") " -Microphone " Q(c[1]), , "Hide", &pid)
+            state := WaitState(status, "Recording", 30000)
+            detail := IniRead(status, "Capture", "Detail", "")
+            Check(state = "Recording", "Microphone '" c[2] "': recording did not start: " state " " detail)
+            Check(InStr(detail, c[2] " / ") = 1, "Expected recording from '" c[2] "', got '" detail "'")
+            Sleep(1000)
+            FileAppend("", stop)
+            state := WaitState(status, "Saved", 15000)
+            Check(state = "Saved", "Microphone '" c[2] "': recording was not saved: " state " " IniRead(status, "Capture", "Detail", ""))
         }
     } finally {
         EnvSet("LOCALAPPDATA", oldAppData)

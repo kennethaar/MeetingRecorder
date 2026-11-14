@@ -3,7 +3,7 @@
 Persistent
 ; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
 TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
-AppVersion := "0.7.1"
+AppVersion := "0.8.0"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -12,6 +12,10 @@ Shortcut := IniRead(Config, "Settings", "Shortcut", "^!r")
 Latest := IniRead(Config, "Settings", "Latest", "")
 DetectOn := IniRead(Config, "Settings", "Detect", 1) = 1
 CalendarOn := IniRead(Config, "Settings", "Calendar", 1) = 1
+; Microphone for Me (#14): device id, or "" for the Windows default. The name is kept to show it
+; while it is not connected.
+Microphone := IniRead(Config, "Settings", "Microphone", "")
+MicrophoneName := IniRead(Config, "Settings", "MicrophoneName", "")
 InCall := false        ; a Teams call is using the microphone
 Offering := false      ; the panel offers to record that call
 CallEnded := false     ; the call ended while recording; the panel offers Stop or Keep recording
@@ -156,7 +160,7 @@ Toggle(*) {
   ShowState()
   Action.Text := "Stop"
   ShowPanel()
-  Run(PSCommand("Record") " -Output " Q(name) " -Status " Q(StatusPath) " -Stop " Q(StopPath) " -ParentId " DllCall("GetCurrentProcessId"),, "Hide", &Child)
+  Run(PSCommand("Record") " -Output " Q(name) " -Status " Q(StatusPath) " -Stop " Q(StopPath) " -ParentId " DllCall("GetCurrentProcessId") (Microphone = "" ? "" : " -Microphone " Q(Microphone)),, "Hide", &Child)
   StartTick := A_TickCount
  } catch as e {
   State := "Attention required"
@@ -652,18 +656,31 @@ Settings(*) {
   return
  }
  ; Only offered when classic Outlook is installed; new Outlook has no local calendar access.
- g := MakeSettings(Folder,Shortcut,DetectOn,CalendarOn,OutlookInstalled())
+ g := MakeSettings(Folder,Shortcut,DetectOn,CalendarOn,OutlookInstalled(),MicList(),Microphone,MicrophoneName)
  open := g.Hwnd
  f := g["Folder"], h := g["Shortcut"], d := g["Detect"]
  c := 0
  try c := g["Calendar"]
+ ; The level bar (#14) follows the microphone picked in the list.
+ meter := MicMeterOpen(MicChoice(g).id)
+ g["Microphone"].OnEvent("Change",(*) => (MicMeterClose(meter), meter := MicMeterOpen(MicChoice(g).id)))
+ SetTimer(LevelTick,50)
  g["Browse"].OnEvent("Click",(*) => BrowseFolder(f))
  g["Save"].OnEvent("Click",SaveSettings)
- g["Cancel"].OnEvent("Click",(*) => g.Destroy())
- g.OnEvent("Escape",(*) => g.Destroy())
+ g["Cancel"].OnEvent("Click",CloseSettings)
+ g.OnEvent("Escape",CloseSettings)
+ g.OnEvent("Close",CloseSettings)
  g.Show()
+ LevelTick() {
+  try ShowLevel(g,MicMeterPeak(meter),MicMuted(meter))
+ }
+ CloseSettings(*) {
+  SetTimer(LevelTick,0)
+  MicMeterClose(meter)
+  g.Destroy()
+ }
  SaveSettings(*) {
-  global Folder, Shortcut, Config, DetectOn, CalendarOn
+  global Folder, Shortcut, Config, DetectOn, CalendarOn, Microphone, MicrophoneName
   try {
    newKey := h.Value
    if newKey = ""
@@ -682,15 +699,33 @@ Settings(*) {
     CalendarOn := c.Value = 1
     IniWrite(CalendarOn ? 1 : 0,Config,"Settings","Calendar")
    }
-   g.Destroy()
+   m := MicChoice(g)
+   Microphone := m.id, MicrophoneName := m.id = "" ? "" : m.name
+   IniWrite(Microphone,Config,"Settings","Microphone")
+   IniWrite(MicrophoneName,Config,"Settings","MicrophoneName")
+   CloseSettings()
   } catch as e {
    MsgBox(e.Message,"Settings not saved")
   }
  }
 }
 ; Folder with Browse beside it, the shortcut, the Teams choices, then Save and Cancel.
-MakeSettings(folder,shortcut,detect,calendar,outlook) {
+MakeSettings(folder,shortcut,detect,calendar,outlook,mics := "",mic := "",micName := "") {
+ ; Microphones (#14): a stored one that is not connected now stays listed, so Save keeps it.
+ list := IsObject(mics) ? mics.Clone() : [{id: "", name: "Windows default"}]
+ pick := 1
+ for m in list
+  if m.id = mic
+   pick := A_Index
+ if mic != "" && pick = 1 {
+  list.InsertAt(2, {id: mic, name: micName, missing: true})
+  pick := 2
+ }
+ names := []
+ for m in list
+  names.Push(m.HasOwnProp("missing") ? m.name " (not connected)" : m.name)
  g := Gui("-MinimizeBox","Meeting Recorder settings")
+ g.Mics := list
  g.MarginX := 16, g.MarginY := 14
  g.SetFont("s10","Segoe UI")
  g.AddText("w440","Save recordings in")
@@ -699,12 +734,123 @@ MakeSettings(folder,shortcut,detect,calendar,outlook) {
  g.AddButton("vBrowse x+8 yp w92 h" h,"Browse...")
  g.AddText("xm y+14 w440","Shortcut to start and stop")
  g.AddHotkey("vShortcut y+4 w200",shortcut)
- g.AddCheckbox("vDetect y+14 Checked" detect,"Offer to record when a Teams call starts")
+ g.AddText("xm y+14 w440","Microphone")
+ g.AddDropDownList("vMicrophone y+4 w440 Choose" pick,names)
+ g.AddProgress("vLevel y+8 w300 h10 Range0-100",0)
+ g.AddText("vLevelHint x+8 yp-4 w132","Talk to test it")
+ g.AddCheckbox("vDetect xm y+12 Checked" detect,"Offer to record when a Teams call starts")
  if outlook
   g.AddCheckbox("vCalendar y+8 Checked" calendar,"Name recordings after the meeting in classic Outlook")
  g.AddButton("vSave x264 y+18 w92 Default","Save")
  g.AddButton("vCancel x+8 w92","Cancel")
  return g
+}
+; ---------------------------------------------------------------- microphone choice (#14)
+; Windows Core Audio through COM: IMMDeviceEnumerator, IMMDevice, IAudioClient, IAudioMeterInformation.
+; Windows default first (with the device's name), then every connected microphone.
+MicList() {
+ list := [{id: "", name: "Windows default"}]
+ try {
+  e := ComObject("{BCDE0395-E52F-467C-8E3D-C4579291692E}", "{A95664D2-9614-4F35-A746-DE8DB63617E6}")
+  try {
+   ComCall(4, e, "int", 1, "int", 2, "ptr*", &dev := 0)   ; capture, communications
+   list[1].name := "Windows default (" MicName(dev) ")"
+   ObjRelease(dev)
+  }
+  ComCall(3, e, "int", 1, "uint", 1, "ptr*", &all := 0)   ; capture, active
+  ComCall(3, all, "uint*", &n := 0)
+  loop n {
+   ComCall(4, all, "uint", A_Index - 1, "ptr*", &dev := 0)
+   ComCall(5, dev, "ptr*", &p := 0)
+   id := StrGet(p, "UTF-16"), DllCall("ole32\CoTaskMemFree", "ptr", p)
+   list.Push({id: id, name: MicName(dev)})
+   ObjRelease(dev)
+  }
+  ObjRelease(all)
+ }
+ return list
+}
+; The name Windows shows for a device, such as "Microphone (Sennheiser Profile)".
+MicName(dev) {
+ name := ""
+ ComCall(4, dev, "uint", 0, "ptr*", &store := 0)
+ key := Buffer(20), DllCall("ole32\CLSIDFromString", "wstr", "{A45C254E-DF1C-4EFD-8020-67D146A850E0}", "ptr", key)
+ NumPut("uint", 14, key, 16)   ; PKEY_Device_FriendlyName
+ pv := Buffer(24, 0)
+ try {
+  ComCall(5, store, "ptr", key, "ptr", pv)
+  if NumGet(pv, 0, "ushort") = 31   ; VT_LPWSTR
+   name := StrGet(NumGet(pv, 8, "ptr"), "UTF-16")
+  DllCall("ole32\PropVariantClear", "ptr", pv)
+ }
+ ObjRelease(store)
+ return name
+}
+; Opens a microphone so its level can be read; "" = the Windows default. Windows measures the
+; level only while something listens, so this starts a capture stream that is never read.
+MicMeterOpen(id) {
+ m := {dev: 0, client: 0, meter: 0, volume: 0}
+ try {
+  e := ComObject("{BCDE0395-E52F-467C-8E3D-C4579291692E}", "{A95664D2-9614-4F35-A746-DE8DB63617E6}")
+  if id = ""
+   ComCall(4, e, "int", 1, "int", 2, "ptr*", &dev := 0)
+  else
+   ComCall(5, e, "wstr", id, "ptr*", &dev := 0)
+  m.dev := dev
+  iid := Buffer(16)
+  DllCall("ole32\CLSIDFromString", "wstr", "{1CB9AD4C-DBFA-4C32-B178-C2F568A703B2}", "ptr", iid)
+  ComCall(3, dev, "ptr", iid, "uint", 23, "ptr", 0, "ptr*", &client := 0)
+  m.client := client
+  ComCall(8, client, "ptr*", &fmt := 0)
+  try ComCall(3, client, "int", 0, "uint", 0, "int64", 10000000, "int64", 0, "ptr", fmt, "ptr", 0)
+  DllCall("ole32\CoTaskMemFree", "ptr", fmt)
+  try ComCall(10, client)
+  DllCall("ole32\CLSIDFromString", "wstr", "{C02216F6-8C67-4B5B-9D00-D008E73E0064}", "ptr", iid)
+  ComCall(3, dev, "ptr", iid, "uint", 23, "ptr", 0, "ptr*", &meter := 0)
+  m.meter := meter
+  DllCall("ole32\CLSIDFromString", "wstr", "{5CDF2C82-841E-4546-9722-0CF74078229A}", "ptr", iid)
+  ComCall(3, dev, "ptr", iid, "uint", 23, "ptr", 0, "ptr*", &volume := 0)   ; IAudioEndpointVolume
+  m.volume := volume
+ }
+ return m
+}
+; True when the microphone is muted in Windows: it then records only silence.
+MicMuted(m) {
+ muted := 0
+ if m.HasOwnProp("volume") && m.volume
+  try ComCall(15, m.volume, "int*", &muted)
+ return muted ? 1 : 0
+}
+; The level bar under the microphone in Settings, and the words beside it.
+ShowLevel(g, peak, muted) {
+ g["Level"].Value := muted ? 0 : Round(Min(1, peak) * 100)
+ hint := muted ? "Muted in Windows" : "Talk to test it"
+ if g["LevelHint"].Text != hint
+  g["LevelHint"].Text := hint
+}
+; Loudest sound just now, 0 to 1.
+MicMeterPeak(m) {
+ peak := 0.0
+ if m.meter
+  try ComCall(3, m.meter, "float*", &peak)
+ return peak
+}
+MicMeterClose(m) {
+ if m.client {
+  try ComCall(11, m.client)
+  ObjRelease(m.client)
+ }
+ if m.meter
+  ObjRelease(m.meter)
+ if m.volume
+  ObjRelease(m.volume)
+ if m.dev
+  ObjRelease(m.dev)
+ m.dev := m.client := m.meter := m.volume := 0
+}
+; The microphone picked in Settings: {id, name}; id "" = Windows default.
+MicChoice(g) {
+ return g.Mics[g["Microphone"].Value]
 }
 BrowseFolder(ctrl) {
  p := DirSelect(ctrl.Value,3,"Recording folder")
@@ -1193,26 +1339,29 @@ HelpTopics() {
         {
             id: "settings",
             title: "Settings",
-            words: "settings folder shortcut hotkey save location options teams outlook calendar",
-            what: "Choose where recordings are saved, which keys start and stop them, and what happens in Teams calls.",
+            words: "settings folder shortcut hotkey save location options teams outlook calendar microphone mic headset level",
+            what: "Choose where recordings go, the keys that start and stop them, your microphone, and what happens in Teams calls.",
             steps: [
-                "Open Settings from the panel or the tray menu.",
+                "Open Settings from the panel or tray menu.",
                 "Type a folder, or click Browse.",
                 "Click the shortcut box and press the new keys.",
-                "Click Save. Changes apply to the next recording.",
+                "Pick your microphone. The bar moves when it hears you.",
+                "Click Save.",
             ],
             keys: [],
             legend: [
                 ["Settings.Folder", "Where recordings are saved"],
                 ["Settings.Browse", "Pick a folder"],
                 ["Settings.Shortcut", "Keys that start and stop"],
+                ["Settings.Microphone", "Your microphone"],
+                ["Settings.Level", "Moves when it hears you"],
                 ["Settings.Detect", "Offer to record Teams calls"],
                 ["?Settings.Calendar", "Name files after classic Outlook meetings"],
                 ["Settings.Save", "Save changes"],
                 ["Settings.Cancel", "Close without saving"],
             ],
             view: "Settings",
-            more: "The Outlook choice is shown only when classic Outlook is installed. Settings are kept in %LOCALAPPDATA%\MeetingRecorder\settings.ini.",
+            more: "Changes apply to the next recording. If your microphone is not connected when you record, or stops during a call, the Windows default records you instead. The Outlook choice is shown only when classic Outlook is installed. Settings are kept in %LOCALAPPDATA%\MeetingRecorder\settings.ini.",
         },
         {
             id: "transcribe",

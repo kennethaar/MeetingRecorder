@@ -1,4 +1,4 @@
-﻿param([ValidateSet('Setup','Record','Recover','Transcriber')][string]$Mode='Setup',[string]$Output,[string]$Status,[string]$Stop,[int]$ParentId)
+﻿param([ValidateSet('Setup','Record','Recover','Transcriber')][string]$Mode='Setup',[string]$Output,[string]$Status,[string]$Stop,[int]$ParentId,[string]$Microphone='')
 $ErrorActionPreference='Stop'
 $runtime=Join-Path $env:LOCALAPPDATA 'MeetingRecorder'
 $deps=Join-Path $runtime 'backend-2.2.1'
@@ -89,5 +89,5 @@ try {
  if(!$facade){throw 'Install or repair .NET Framework 4.8, then retry.'}
  Add-Type -Path (Join-Path $PSScriptRoot 'Capture.cs') -ReferencedAssemblies @($core,$wasapi,$facade,'System.dll','System.Core.dll')
  if($Mode -eq 'Setup'){Set-State 'Ready' 'Backend ready';exit 0}
- [CaptureEngine]::Run($Output,$Status,$Stop,$ParentId)
+ [CaptureEngine]::Run($Output,$Status,$Stop,$ParentId,$Microphone)
 } catch {Set-State 'Error' $_.Exception.Message;exit 1}

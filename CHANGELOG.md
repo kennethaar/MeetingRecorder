@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0 - 2026-11-14
+
+- Settings: Pick the microphone that records you. A bar moves when it hears
+  you, so you can check it before a call, and it says so when Windows has
+  muted the microphone (#14).
+- Record a meeting: If your microphone stops during a call, recording goes
+  on with the Windows default instead of stopping (#14).
+
 ## 0.7.1 - 2026-11-14
 
 - Record a meeting: What others say is now recorded from every speaker and
