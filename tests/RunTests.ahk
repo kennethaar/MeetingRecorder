@@ -35,7 +35,7 @@ Tests := [
     ["Transcribing goes on while the app reads its progress (#7)", TestStatusWhileRead],
     ["A recording is transcribed on this PC into Others and Me, and picks up where it stopped (#7, #12)", TestTranscribeSpeech],
     ["Transcribing shows its steps, a moving bar while getting ready, and a ring on the tray icon (#12)", TestTranscribeProgress],
-    ["A model download shows how much is done, and a stuck word-timing download is skipped (#16)", TestModelDownload],
+    ["A model download shows how much is done and the time left; the word-timing model downloads in the background (#16)", TestModelDownload],
     ["Recording saved window says what is new and offers to transcribe again (#8)", TestNoticeView],
     ["Tray menu shows transcribing, recordings, Help and About (#8)", TestTrayMenu],
     ["Tray menu › Recordings lists the newest recordings to open (#11)", TestRecentRecordings],
@@ -681,7 +681,12 @@ TestModelDownload() {
         while !job.Status && A_TickCount - start < 60000
             Sleep(100)
         out := job.StdOut.ReadAll(), err := job.StdErr.ReadAll()
-        Check(RegExMatch(out, "m)^grew True .*Downloading the test model: [1-4] of 4 MB"), "The download did not show how much was done:`n" out err)
+        Check(RegExMatch(out, "m)^left working out the time left \| less than a minute left \| about 12 min left \| about 1 h 40 min left$"), "Time left was said wrong:`n" out err)
+        Check(RegExMatch(out, "m)^grew True .*Downloading the speech model / Downloading the speech model, only this first time: [1-4] of 4 MB, less than a minute left\."), "The speech model download did not show how much was done and the time left:`n" out err)
+        Check(RegExMatch(out, "m)^during Writing down what others said / Also downloading the word-timing model, only this first time: 1 of 3 MB, less than a minute left\. Until it is done, times are less exact\.$"), "The word-timing model must download beside the steps, not hold them up:`n" out err)
+        Check(RegExMatch(out, "m)^ticked Also downloading the word-timing model, only this first time: 2 of 3 MB"), "The background download progress did not move on its own:`n" out err)
+        Check(RegExMatch(out, "m)^finished [1-5]$"), "The transcriber must wait for the background download before it ends:`n" out err)
+        Check(RegExMatch(out, "m)^after \(empty\)$"), "A finished download must no longer show:`n" out err)
         Check(RegExMatch(out, "m)^stuck False ([2-9])$"), "A stuck download was not given up after 2 s:`n" out err)
         Check(InStr(out, "no progress"), "The log does not say the download made no progress:`n" out err)
         Check(InStr(out, "failed no network"), "A failed download must pass on its error:`n" out err)
@@ -818,11 +823,21 @@ TestTranscribeProgress() {
     Check(TrayStatusText("Working", 42, 4) = "Transcribing: 42% done", "Tray menu while writing: " TrayStatusText("Working", 42, 4))
     Check(TranscribeTip(0, 1, "Loading the speech model") = "Transcribing: getting ready, loading the speech model", "Tooltip while loading: " TranscribeTip(0, 1, "Loading the speech model"))
     Check(TranscribeTip(42.4, 4, "Writing down what you said") = "Transcribing: 42%, writing down what you said", "Tooltip while writing: " TranscribeTip(42.4, 4, "Writing down what you said"))
-    ; #16: a model download took half an hour unseen. The window says it is downloading, and how much is done.
-    for c in [["Working", "Downloading the speech model: 0.4 of 1.6 GB", "Downloading the speech model: 0.4 of 1.6 GB...  3 min so far. Click Hide to keep working."]
-        , ["Working", "Loading the speech model", "3 min so far. Click Hide to keep working."]
-        , ["Installing", "Getting the transcriber ready", "Getting the transcriber ready...  3 min so far. Click Hide to keep working."]]
-        Check(TranscribeStatusText(c[1], c[2], 3) = c[3], "Window status for '" c[2] "' was: " TranscribeStatusText(c[1], c[2], 3))
+    ; #16: a model download took half an hour unseen. The window says it is downloading, how much
+    ; is done, the time left, and that it happens only the first time.
+    dl := "Downloading the speech model, only this first time: 0.4 of 1.6 GB, about 12 min left."
+    for c in [["Working", "Downloading the speech model", dl, dl "`n3 min so far. Click Hide to keep working."]
+        , ["Working", "Loading the speech model", "", "3 min so far. Click Hide to keep working."]
+        , ["Installing", "Getting the transcriber ready", "", "Getting the transcriber ready...  3 min so far. Click Hide to keep working."]]
+        Check(TranscribeStatusText(c[1], c[2], 3, c[3]) = c[4], "Window status for '" c[2] "' was: " TranscribeStatusText(c[1], c[2], 3, c[3]))
+    n := MakeNotice("C:\Rec\2026-11-13 095900 - Market Demo MEPS - 1A2B3C4D.wav", "Saved", "")
+    try {
+        ShowSteps(n, 1, false, 0, true)
+        Check(n["Step1"].Text = "● Download the speech model", "While the speech model downloads, step 1 must say Download: " n["Step1"].Text)
+        ShowSteps(n, 1, false, 0)
+        Check(n["Step1"].Text = "● Load the speech model", "Step 1 must say Load when nothing downloads: " n["Step1"].Text)
+    } finally
+        n.Destroy()
 
     ; The ring on the icon, read from its pixels: white where it has filled, grey where it has not.
     s := 32, right := [27, 16], left := [5, 16], bottomRight := [24, 24], topLeft := [8, 8]

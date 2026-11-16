@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.2 - 2026-11-16
+
+- Transcribe a recording: Transcribing starts at once, while the word-timing
+  model for a new language downloads in the background. Until it is there, the
+  times are less exact. A model download shows how much is done, the time
+  left, and that it happens only the first time (#16).
+
 ## 0.9.1 - 2026-11-16
 
 - Transcribe a recording: When a speech model has to be downloaded first, the

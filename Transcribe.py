@@ -16,6 +16,8 @@ The audio is read here rather than by WhisperX, so no ffmpeg.exe is needed.
 """
 import os
 import sys
+import threading
+import time
 
 # huggingface_hub symlinks its cache by default, which needs admin rights or Developer Mode.
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
@@ -23,29 +25,38 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 SAMPLE_RATE = 16000
 
+state_lock = threading.RLock()
+last_state = None   # the arguments of the last set_state, which the background ticker repeats
+background = None   # a Download running beside the transcription (#16)
 
-def set_state(path, state, percent, detail, step=0, resumed=False):
+
+def set_state(path, state, percent, detail, step=0, resumed=False, download=None):
     """Step (#12): 1 load the speech model, 2 find where people speak, 3 write down what others
-    said, 4 write down what you said. Resumed=1 when what others said was saved by an earlier try."""
-    text = "[Transcribe]\r\nState=%s\r\nPercent=%d\r\nDetail=%s\r\nStep=%d\r\nResumed=%d\r\n" % (
-        state, percent, " ".join(str(detail).split()), step, 1 if resumed else 0)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-16", newline="") as f:
-        f.write(text)
-    # The app reads the file every 200 ms, and Windows refuses to replace it during a read (#7).
-    # Wait for the read to end. A progress update that still cannot be written is skipped,
-    # so it never stops the transcription; Done and Error must get through.
-    import time
-    for attempt in range(100):
-        try:
-            os.replace(tmp, path)
-            return
-        except PermissionError:
-            if attempt == 99:
-                if state == "Working":
-                    return
-                raise
-            time.sleep(0.05)
+    said, 4 write down what you said. Resumed=1 when what others said was saved by an earlier try.
+    Download (#16) is a model download to show, or by default the one in the background."""
+    global last_state
+    with state_lock:
+        last_state = (path, state, percent, detail, step, resumed)
+        if download is None:
+            download = background.text() if background is not None else ""
+        text = "[Transcribe]\r\nState=%s\r\nPercent=%d\r\nDetail=%s\r\nStep=%d\r\nResumed=%d\r\nDownload=%s\r\n" % (
+            state, percent, " ".join(str(detail).split()), step, 1 if resumed else 0, " ".join(download.split()))
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-16", newline="") as f:
+            f.write(text)
+        # The app reads the file every 200 ms, and Windows refuses to replace it during a read (#7).
+        # Wait for the read to end. A progress update that still cannot be written is skipped,
+        # so it never stops the transcription; Done and Error must get through.
+        for attempt in range(100):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 99:
+                    if state == "Working":
+                        return
+                    raise
+                time.sleep(0.05)
 
 
 class TimedLog:
@@ -125,47 +136,121 @@ def size_text(done, total):
     return "%d of %d MB" % (round(done / 1e6), round(total / 1e6))
 
 
-# huggingface_hub writes in 10 MB chunks, so at 0.1 MB/s the file grows only every 100 s.
+def time_left_text(seconds):
+    if seconds is None:
+        return "working out the time left"
+    if seconds < 60:
+        return "less than a minute left"
+    hours, minutes = divmod(round(seconds / 60), 60)
+    if not hours:
+        return "about %d min left" % minutes
+    return "about %d h %d min left" % (hours, minutes) if minutes else "about %d h left" % hours
+
+
+class Download:
+    """Runs download() in a thread and measures how much of total bytes has reached folder (#16).
+    huggingface_hub writes in 10 MB chunks, so at 0.1 MB/s the file grows only every 100 s;
+    stall is how long no growth counts as stuck."""
+
+    def __init__(self, label, folder, total, download, stall=300):
+        self.label, self.folder, self.total, self.stall, self.error = label, folder, total, stall, None
+        self.begin = self.moved = self.logged = time.time()
+        self.first = self.done = folder_bytes(folder)
+        print("Downloading %s to %s: %s" % (label, folder, size_text(self.done, total)))
+
+        def run():
+            try:
+                download()
+            except BaseException as e:
+                self.error = e
+
+        self.thread = threading.Thread(target=run, daemon=True)
+        self.thread.start()
+
+    def running(self):
+        return self.thread.is_alive()
+
+    def stalled(self):
+        return time.time() - self.moved >= self.stall
+
+    def poll(self):
+        now, done = time.time(), folder_bytes(self.folder)
+        if done != self.done:
+            self.done, self.moved = done, now
+        if now - self.logged >= 30:
+            print("Downloading %s: %s, %.2f MB/s, %s" % (self.label, size_text(done, self.total),
+                  (done - self.first) / 1e6 / max(now - self.begin, 1), time_left_text(self.left())))
+            self.logged = now
+
+    def left(self):
+        rate = (self.done - self.first) / max(time.time() - self.begin, 0.001)
+        return max(self.total - self.done, 0) / rate if rate > 0 else None
+
+    def progress(self):
+        """"0.4 of 1.6 GB, about 12 min left" """
+        self.poll()
+        return "%s, %s" % (size_text(min(self.done, self.total), self.total), time_left_text(self.left()))
+
+    def text(self):
+        """The line beside the steps while this downloads in the background; "" when it is not."""
+        if not self.running() or self.stalled():
+            return ""
+        return "Also downloading %s, only this first time: %s. Until it is done, times are less exact." % (self.label, self.progress())
+
+    def report(self):
+        """Logs how it ended; raises the download's error."""
+        if self.running():
+            print("Download of %s made no progress for %d s, at %s" % (self.label, self.stall, size_text(self.done, self.total)))
+        elif self.error is not None:
+            print("Download of %s failed: %r" % (self.label, self.error))
+            raise self.error
+        else:
+            print("Downloaded %s in %.0f s" % (self.label, time.time() - self.begin))
+
+
 def fetch(status, label, folder, total, download, stall=300, step=1, resumed=False):
-    """Runs download() and shows how much of total bytes has reached folder (#16).
-    Returns True when it is done, and False when nothing arrived for stall seconds; the
-    download then goes on in the background, and a later try resumes it. An error in
-    download() is raised here."""
-    import threading
-    import time
-    outcome = {}
+    """Downloads what is needed before transcribing can start, showing how far it is (#16).
+    True when done; False when nothing arrived for stall seconds. Raises the download's error."""
+    d = Download(label, folder, total, download, stall)
+    while d.running() and not d.stalled():
+        set_state(status, "Working", 0, "Downloading " + label, step, resumed,
+                  download="Downloading %s, only this first time: %s." % (label, d.progress()))
+        d.thread.join(0.5)
+    d.poll()
+    d.report()
+    return not d.running()
 
-    def run():
-        try:
-            download()
-        except BaseException as e:
-            outcome["error"] = e
 
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    begin = time.time()
-    first = last = folder_bytes(folder)
-    moved = logged = begin
-    print("Downloading %s to %s: %s" % (label, folder, size_text(first, total)))
-    while True:
-        thread.join(0.5)
-        if not thread.is_alive():
-            break
-        now, done = time.time(), folder_bytes(folder)
-        if done != last:
-            last, moved = done, now
-        set_state(status, "Working", 0, "Downloading %s: %s" % (label, size_text(min(done, total), total)), step, resumed)
-        if now - logged >= 30:
-            print("Downloading %s: %s, %.1f MB/s" % (label, size_text(done, total), (done - first) / 1e6 / max(now - begin, 1)))
-            logged = now
-        if now - moved >= stall:
-            print("Download of %s made no progress for %d s, at %s" % (label, stall, size_text(done, total)))
-            return False
-    if "error" in outcome:
-        print("Download of %s failed: %r" % (label, outcome["error"]))
-        raise outcome["error"]
-    print("Downloaded %s in %.0f s" % (label, time.time() - begin))
-    return True
+def start_background(d):
+    """Shows d beside the steps, refreshed every second, while the transcript is written (#16)."""
+    global background
+    background = d
+
+    def tick():
+        while d.running():
+            time.sleep(1)
+            with state_lock:
+                if last_state is not None and background is d:
+                    set_state(*last_state)
+
+    threading.Thread(target=tick, daemon=True).start()
+
+
+def finish_background():
+    """Waits for the background download, so the next transcript has the model; gives up when it
+    is stuck, and a later try resumes it."""
+    global background
+    d = background
+    if d is None:
+        return
+    while d.running() and not d.stalled():
+        d.thread.join(1)
+        d.poll()
+    try:
+        d.report()
+    except BaseException:
+        pass
+    background = None
 
 
 def hub_folder(repo):
@@ -204,9 +289,9 @@ def get_speech_model(status, model_name, resumed):
         raise RuntimeError("The speech model download stopped. Check the internet connection and try again.")
 
 
-def get_align_model(status, language, resumed):
-    """Downloads the word-timing model for the language the first time, showing how far it is.
-    False when the download got stuck, so the transcript goes on without word timing (#16)."""
+def get_align_model(language):
+    """True when the word-timing model for the language is on this PC. Otherwise it starts
+    downloading in the background, and this transcript goes on without word timing (#16)."""
     from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF
     repo = DEFAULT_ALIGN_MODELS_HF.get(language)
     weights = ["model.safetensors", "pytorch_model.bin"]
@@ -216,8 +301,9 @@ def get_align_model(status, language, resumed):
     from huggingface_hub import snapshot_download
     files = hub_files(repo)
     keep = [name for name in files if name.endswith(".json")] + [next(w for w in weights if w in files)]
-    return fetch(status, "the word-timing model", hub_folder(repo), sum(files[n] for n in keep),
-                 lambda: snapshot_download(repo, allow_patterns=keep), resumed=resumed)
+    start_background(Download("the word-timing model", hub_folder(repo), sum(files[n] for n in keep),
+                              lambda: snapshot_download(repo, allow_patterns=keep)))
+    return False
 
 
 def read_channels(path):
@@ -339,14 +425,13 @@ def main(wav, status, out, hint="", model_name="large-v3-turbo"):
         if language is None:
             with stage("Language"):
                 language = model.detect_language(language_sample(left, right))
-        # No word-timing model for this language, offline or stuck: keep WhisperX's own times (#16).
+        # No word-timing model for this language yet, or offline: keep WhisperX's own times (#16).
         try:
-            if get_align_model(status, language, resumed):
-                set_state(status, "Working", 0, "Loading the speech model", 1, resumed)
+            if get_align_model(language):
                 with stage("Word-timing model"):
                     align_model, align_meta = whisperx.load_align_model(language_code=language, device="cpu")
             else:
-                print("Word timing skipped: its model is still downloading. A later try goes on with it.")
+                print("Word timing skipped for this transcript: its model downloads in the background.")
         except Exception as e:
             print("Word timing skipped:", repr(e))
             align_model = align_meta = None
@@ -405,6 +490,7 @@ def main(wav, status, out, hint="", model_name="large-v3-turbo"):
             pass
     set_state(status, "Done", 100, "Transcript ready", 4, resumed)
     print("Transcript ready: %d lines" % len(rows))
+    finish_background()
 
 
 if __name__ == "__main__":

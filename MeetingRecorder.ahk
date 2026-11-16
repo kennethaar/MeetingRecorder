@@ -3,7 +3,7 @@
 Persistent
 ; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
 TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
-AppVersion := "0.9.1"
+AppVersion := "0.9.2"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -36,6 +36,7 @@ CompletionKind := ""   ; "Saved" or "Incomplete"
 ; Transcription on this PC (#7). TxState: "", "Installing", "Working", "Error".
 TxState := "", TxWav := "", TxPid := 0, TxStart := 0, TxPercent := 0, TxDetail := ""
 TxStep := 0, TxResumed := false   ; step 1-4 and whether an earlier try's part was kept (#12)
+TxDownload := ""   ; a model download's progress, from the transcriber (#16)
 TxStatusPath := AppDir "\transcribe.ini"
 TxSegmentsPath := AppDir "\transcribe.tsv"
 TxSetupPath := AppDir "\transcriber-setup.ini"
@@ -474,8 +475,8 @@ TranscribeTip(percent,step,detail) {
 }
 ; The Recording saved window while transcribing: the steps, the finished ones ticked and the one
 ; now in bold, and a bar that moves by itself until there is a percent to show (#12).
-ShowSteps(g,step,resumed,percent) {
- names := ["Load the speech model","Find where people speak","Write down what others said","Write down what you said"]
+ShowSteps(g,step,resumed,percent,downloading:=false) {
+ names := [(downloading ? "Download" : "Load") " the speech model","Find where people speak","Write down what others said","Write down what you said"]
  loop 4 {
   c := g["Step" A_Index]
   done := A_Index < step || (resumed && A_Index = 3)
@@ -948,7 +949,8 @@ StartTranscribe(wav) {
   return
  for path in [TxStatusPath, TxSegmentsPath, TxSetupPath]
   try FileDelete(path)
- TxWav := wav, TxStart := A_TickCount, TxPercent := 0, TxStep := 1, TxResumed := false
+ global TxStep, TxResumed, TxDownload
+ TxWav := wav, TxStart := A_TickCount, TxPercent := 0, TxStep := 1, TxResumed := false, TxDownload := ""
  try {
   if py = "" {
    TxState := "Installing", TxDetail := "Getting the transcriber ready", TxStep := 0
@@ -965,7 +967,7 @@ StartTranscribe(wav) {
  ShowTranscribeState()
 }
 TranscribePoll() {
- global TxState, TxWav, TxPid, TxPercent, TxDetail, TxStatusPath, TxSegmentsPath, TxSetupPath, TxStep, TxResumed
+ global TxState, TxWav, TxPid, TxPercent, TxDetail, TxStatusPath, TxSegmentsPath, TxSetupPath, TxStep, TxResumed, TxDownload
  alive := TxPid && ProcessExist(TxPid)   ; checked before the status, so a final status is never missed
  if TxState = "Installing" {
   s := IniRead(TxSetupPath,"Capture","State","")
@@ -981,6 +983,7 @@ TranscribePoll() {
   step := IniRead(TxStatusPath,"Transcribe","Step","")
   TxStep := IsInteger(step) && step >= 1 ? Integer(step) : TxStep
   TxResumed := IniRead(TxStatusPath,"Transcribe","Resumed",TxResumed ? 1 : 0) = 1
+  TxDownload := IniRead(TxStatusPath,"Transcribe","Download","")
   if s = "Done" {
    try {
     WriteTranscript(TxWav, TxSegmentsPath)
@@ -1011,11 +1014,10 @@ AnnounceTranscript() {
   TrayTip(name, TxState = "Error" ? "Transcription failed" : "Transcript ready", 0x24)
  }
 }
-; The line under the steps while transcribing. Setup and model downloads say what they are
-; doing and how far they are, since they can take long (#16).
-TranscribeStatusText(state, detail, minutes) {
- shown := state = "Installing" || InStr(detail, "Downloading") = 1
- return (shown ? detail "...  " : "") minutes " min so far. Click Hide to keep working."
+; The line under the steps while transcribing. Setup says what it is doing; a model download
+; (download, from the transcriber) says how far it is and the time left, since it can take long (#16).
+TranscribeStatusText(state, detail, minutes, download := "") {
+ return (state = "Installing" ? detail "...  " : "") (download != "" ? download "`n" : "") minutes " min so far. Click Hide to keep working."
 }
 StopTranscriber() {
  global TxState, TxPid
@@ -1027,7 +1029,7 @@ StopTranscriber() {
 ; Shows the transcription state in the tray menu, and in the Recording saved window for the
 ; recording it is about.
 ShowTranscribeState() {
- global Completion, CompletionKind, TxState, TxStart, TxPercent, TxDetail, TxStep, TxResumed
+ global Completion, CompletionKind, TxState, TxStart, TxPercent, TxDetail, TxStep, TxResumed, TxDownload
  percent := Round(IsNumber(TxPercent) ? TxPercent : 0)
  SetTrayStatus(A_TrayMenu, TrayStatusText(TxState, percent, TxStep))
  UpdateTrayIcon()
@@ -1041,7 +1043,7 @@ ShowTranscribeState() {
  status := Completion["TranscribeStatus"], bar := Completion["TranscribeProgress"]
  busy := tx = "busy"
  if busy && TxState = "Working"
-  ShowSteps(Completion, TxStep, TxResumed, percent)
+  ShowSteps(Completion, TxStep, TxResumed, percent, InStr(TxDetail, "Downloading the speech model") = 1)
  else {
   loop 4
    Completion["Step" A_Index].Visible := false
@@ -1049,7 +1051,7 @@ ShowTranscribeState() {
   bar.Visible := busy
  }
  if busy
-  status.Text := TranscribeStatusText(TxState, TxDetail, (A_TickCount - TxStart)//60000)
+  status.Text := TranscribeStatusText(TxState, TxDetail, (A_TickCount - TxStart)//60000, TxState = "Working" ? TxDownload : "")
  else if tx = "failed"
   status.Text := TxDetail
  status.Visible := busy || tx = "failed"
@@ -1406,7 +1408,7 @@ HelpTopics() {
                 ["Saved.Hide", "Hide. Transcribing goes on."],
             ],
             view: "Saved",
-            more: "Others is what you heard. Me is your microphone. Getting ready takes a few minutes, so the bar moves by itself until there is a percent. If transcribing stops, Try again picks up where it stopped: a finished part is kept. Transcribe again replaces the transcript you have. To get this window back, choose the recording under Recordings in the tray menu. The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. A pause of 2 seconds starts a new paragraph with its own time. If the recording is named after an Outlook meeting, its title and the names of the people invited help spell names right. They are kept in %LOCALAPPDATA%\MeetingRecorder\meetings.ini. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. A meeting in a new language may need a word-timing model first; the window says how much of it is downloaded. If that download stops, the transcript is made without it. Each try is written down in %LOCALAPPDATA%\MeetingRecorder\transcribe.ini.log. Fast suits English and takes about as long as the meeting lasted. For a meeting in another language, pick Accurate under Transcribe with in Settings; it takes about twice as long and needs more memory. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
+            more: "Others is what you heard. Me is your microphone. Getting ready takes a few minutes, so the bar moves by itself until there is a percent. If transcribing stops, Try again picks up where it stopped: a finished part is kept. Transcribe again replaces the transcript you have. To get this window back, choose the recording under Recordings in the tray menu. The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. A pause of 2 seconds starts a new paragraph with its own time. If the recording is named after an Outlook meeting, its title and the names of the people invited help spell names right. They are kept in %LOCALAPPDATA%\MeetingRecorder\meetings.ini. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. Each speech model is downloaded the first time it is used; the window shows how much is done and the time left. A meeting in a new language also needs a word-timing model. It downloads in the background while the transcript is made, so until it is there, the times are less exact. Each try is written down in %LOCALAPPDATA%\MeetingRecorder\transcribe.ini.log. Fast suits English and takes about as long as the meeting lasted. For a meeting in another language, pick Accurate under Transcribe with in Settings; it takes about twice as long and needs more memory. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
         },
         {
             id: "tray",
