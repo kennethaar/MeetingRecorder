@@ -7,7 +7,8 @@ those names and words come out spelled right.
 
 The left channel is what the user heard (Others), the right channel their microphone (Me),
 so no speaker detection is needed. Progress goes to status.ini ([Transcribe] State, Percent,
-Detail; UTF-16, replaced atomically), details to status.ini.log. The result is one
+Detail; UTF-16, replaced atomically), details to status.ini.log (every line timed, earlier
+tries kept, #16). The result is one
 start<TAB>end<TAB>speaker<TAB>text line per segment (UTF-8); MeetingRecorder.ahk turns it into
 the .txt and .srt next to the recording.
 
@@ -45,6 +46,178 @@ def set_state(path, state, percent, detail, step=0, resumed=False):
                     return
                 raise
             time.sleep(0.05)
+
+
+class TimedLog:
+    """Puts the time before every line, so a slow or stuck step shows in the log (#16)."""
+
+    def __init__(self, f):
+        self.f, self.at_start = f, True
+
+    def write(self, text):
+        import time
+        for piece in str(text).splitlines(True):
+            if self.at_start:
+                self.f.write(time.strftime("%H:%M:%S "))
+            self.f.write(piece)
+            self.at_start = piece.endswith(("\n", "\r"))
+        return len(text)
+
+    def flush(self):
+        self.f.flush()
+
+    def fileno(self):
+        return self.f.fileno()
+
+    def isatty(self):
+        return False
+
+    @property
+    def encoding(self):
+        return self.f.encoding
+
+
+def open_log(path, keep=1000000):
+    """Adds to the log instead of replacing it, so the try before stays readable (#16).
+    A log over keep bytes is cut to its newest half."""
+    try:
+        if os.path.getsize(path) > keep:
+            with open(path, "rb") as f:
+                f.seek(-(keep // 2), 2)
+                tail = f.read()
+            with open(path, "wb") as f:
+                f.write(tail[tail.find(b"\n") + 1:])
+    except OSError:
+        pass
+    return TimedLog(open(path, "a", encoding="utf-8", errors="replace", buffering=1))
+
+
+class stage:
+    """Logs when a stage starts, and how long it took."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __enter__(self):
+        import time
+        self.start = time.time()
+        print(self.name + ": starting")
+
+    def __exit__(self, kind, error, trace):
+        import time
+        print("%s %s in %.1f s" % (self.name, "ready" if kind is None else "failed", time.time() - self.start))
+
+
+def folder_bytes(folder):
+    total = 0
+    for top, dirs, files in os.walk(folder):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(top, name))
+            except OSError:
+                pass
+    return total
+
+
+def size_text(done, total):
+    if total >= 1e9:
+        return "%.1f of %.1f GB" % (done / 1e9, total / 1e9)
+    return "%d of %d MB" % (round(done / 1e6), round(total / 1e6))
+
+
+# huggingface_hub writes in 10 MB chunks, so at 0.1 MB/s the file grows only every 100 s.
+def fetch(status, label, folder, total, download, stall=300, step=1, resumed=False):
+    """Runs download() and shows how much of total bytes has reached folder (#16).
+    Returns True when it is done, and False when nothing arrived for stall seconds; the
+    download then goes on in the background, and a later try resumes it. An error in
+    download() is raised here."""
+    import threading
+    import time
+    outcome = {}
+
+    def run():
+        try:
+            download()
+        except BaseException as e:
+            outcome["error"] = e
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    begin = time.time()
+    first = last = folder_bytes(folder)
+    moved = logged = begin
+    print("Downloading %s to %s: %s" % (label, folder, size_text(first, total)))
+    while True:
+        thread.join(0.5)
+        if not thread.is_alive():
+            break
+        now, done = time.time(), folder_bytes(folder)
+        if done != last:
+            last, moved = done, now
+        set_state(status, "Working", 0, "Downloading %s: %s" % (label, size_text(min(done, total), total)), step, resumed)
+        if now - logged >= 30:
+            print("Downloading %s: %s, %.1f MB/s" % (label, size_text(done, total), (done - first) / 1e6 / max(now - begin, 1)))
+            logged = now
+        if now - moved >= stall:
+            print("Download of %s made no progress for %d s, at %s" % (label, stall, size_text(done, total)))
+            return False
+    if "error" in outcome:
+        print("Download of %s failed: %r" % (label, outcome["error"]))
+        raise outcome["error"]
+    print("Downloaded %s in %.0f s" % (label, time.time() - begin))
+    return True
+
+
+def hub_folder(repo):
+    from huggingface_hub import constants
+    return os.path.join(constants.HF_HUB_CACHE, "models--" + repo.replace("/", "--"))
+
+
+def hub_files(repo):
+    """{file name: bytes} of a model on the Hugging Face Hub."""
+    from huggingface_hub import HfApi
+    info = HfApi().model_info(repo, files_metadata=True, timeout=30)
+    return {s.rfilename: s.size or 0 for s in info.siblings}
+
+
+def is_cached(repo, names):
+    from huggingface_hub import try_to_load_from_cache
+    return any(isinstance(try_to_load_from_cache(repo, name), str) for name in names)
+
+
+def get_speech_model(status, model_name, resumed):
+    """Downloads the speech model the first time, showing how far it is."""
+    import fnmatch
+    from faster_whisper.utils import _MODELS, download_model
+    repo = _MODELS.get(model_name, model_name)
+    if is_cached(repo, ["model.bin"]):
+        print("Speech model %s is on this PC" % repo)
+        return
+    patterns = ["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"]
+    try:
+        files = hub_files(repo)
+        total = sum(size for name, size in files.items() if any(fnmatch.fnmatch(name, p) for p in patterns))
+        done = fetch(status, "the speech model", hub_folder(repo), total, lambda: download_model(model_name), resumed=resumed)
+    except Exception as e:
+        raise RuntimeError("Could not download the speech model. Check the internet connection and try again. (%s)" % e)
+    if not done:
+        raise RuntimeError("The speech model download stopped. Check the internet connection and try again.")
+
+
+def get_align_model(status, language, resumed):
+    """Downloads the word-timing model for the language the first time, showing how far it is.
+    False when the download got stuck, so the transcript goes on without word timing (#16)."""
+    from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF
+    repo = DEFAULT_ALIGN_MODELS_HF.get(language)
+    weights = ["model.safetensors", "pytorch_model.bin"]
+    if repo is None or is_cached(repo, weights):
+        print("Word-timing model %s is on this PC or comes with WhisperX" % (repo or language))
+        return True
+    from huggingface_hub import snapshot_download
+    files = hub_files(repo)
+    keep = [name for name in files if name.endswith(".json")] + [next(w for w in weights if w in files)]
+    return fetch(status, "the word-timing model", hub_folder(repo), sum(files[n] for n in keep),
+                 lambda: snapshot_download(repo, allow_patterns=keep), resumed=resumed)
 
 
 def read_channels(path):
@@ -121,8 +294,10 @@ def write_part(path, language, rows):
 
 
 def main(wav, status, out, hint="", model_name="large-v3-turbo"):
-    log = open(status + ".log", "w", encoding="utf-8", buffering=1)
-    sys.stdout = sys.stderr = log
+    import time
+    sys.stdout = sys.stderr = open_log(status + ".log")
+    print("=== Transcribing %s with %s, %s ===" % (os.path.basename(wav), model_name, time.strftime("%Y-%m-%d")))
+    print("Python %s, %d logical cores, process %d" % (sys.version.split()[0], os.cpu_count() or 0, os.getpid()))
     try:
         # Below normal priority: a new recording may start while this runs.
         import ctypes
@@ -136,8 +311,12 @@ def main(wav, status, out, hint="", model_name="large-v3-turbo"):
     if resumed:
         print("Picking up where it stopped: what others said was saved by an earlier try")
     set_state(status, "Working", 0, "Loading the speech model", 1, resumed)
-    import torch
-    import whisperx
+    with stage("Libraries"):
+        import torch
+        import whisperx
+        from importlib.metadata import version
+        print("torch %s, whisperx %s, faster-whisper %s, huggingface_hub %s" % (
+            torch.__version__, version("whisperx"), version("faster-whisper"), version("huggingface_hub")))
 
     # Half the logical cores is as fast as all but one (measured on a 12-thread i7-1255U)
     # and leaves the PC free for the call.
@@ -148,16 +327,28 @@ def main(wav, status, out, hint="", model_name="large-v3-turbo"):
     language = next((part[0] for part in saved.values() if part), None)
     model = align_model = align_meta = left = right = None
     if None in saved.values():
-        left, right = read_channels(wav)
-        model = whisperx.load_model(
-            model_name, "cpu", compute_type="int8", threads=threads, asr_options={"initial_prompt": hint.strip() or None}
-        )
+        with stage("Audio"):
+            left, right = read_channels(wav)
+            print("%.0f s of audio" % (len(left) / SAMPLE_RATE))
+        get_speech_model(status, model_name, resumed)
+        set_state(status, "Working", 0, "Loading the speech model", 1, resumed)
+        with stage("Speech model"):
+            model = whisperx.load_model(
+                model_name, "cpu", compute_type="int8", threads=threads, asr_options={"initial_prompt": hint.strip() or None}
+            )
         if language is None:
-            language = model.detect_language(language_sample(left, right))
+            with stage("Language"):
+                language = model.detect_language(language_sample(left, right))
+        # No word-timing model for this language, offline or stuck: keep WhisperX's own times (#16).
         try:
-            align_model, align_meta = whisperx.load_align_model(language_code=language, device="cpu")
-        except Exception as e:  # no alignment model for this language, or offline: keep WhisperX's own times
-            print("Alignment skipped:", e)
+            if get_align_model(status, language, resumed):
+                set_state(status, "Working", 0, "Loading the speech model", 1, resumed)
+                with stage("Word-timing model"):
+                    align_model, align_meta = whisperx.load_align_model(language_code=language, device="cpu")
+            else:
+                print("Word timing skipped: its model is still downloading. A later try goes on with it.")
+        except Exception as e:
+            print("Word timing skipped:", repr(e))
             align_model = align_meta = None
     print("Language:", language)
 
@@ -174,20 +365,27 @@ def main(wav, status, out, hint="", model_name="large-v3-turbo"):
         else:
             set_state(status, "Working", base, label, step, resumed)
 
+        tenths = [0]
+
         def progress(pct, base=base, label=label, step=step):
             set_state(status, "Working", base + pct * 36 / 100, label, step, resumed)
+            if int(pct) // 10 > tenths[0]:
+                tenths[0] = int(pct) // 10
+                print("%s transcript: %d%%" % (speaker, pct))
 
-        result = model.transcribe(audio, batch_size=8, language=language, progress_callback=progress)
+        with stage(speaker + " transcript"):
+            result = model.transcribe(audio, batch_size=8, language=language, progress_callback=progress)
         segments = result["segments"]
         if segments and align_model is not None:
             try:
-                segments = whisperx.align(
-                    segments, align_model, align_meta, audio, "cpu",
-                    progress_callback=lambda pct, base=base, label=label, step=step: set_state(
-                        status, "Working", base + 36 + pct * 9 / 100, label, step, resumed),
-                )["segments"]
+                with stage(speaker + " word timing"):
+                    segments = whisperx.align(
+                        segments, align_model, align_meta, audio, "cpu",
+                        progress_callback=lambda pct, base=base, label=label, step=step: set_state(
+                            status, "Working", base + 36 + pct * 9 / 100, label, step, resumed),
+                    )["segments"]
             except Exception as e:
-                print("Alignment failed for", speaker, ":", e)
+                print("Word timing failed for", speaker, ":", repr(e))
         part = []
         for s in segments:
             text = " ".join(str(s.get("text", "")).split())
@@ -206,6 +404,7 @@ def main(wav, status, out, hint="", model_name="large-v3-turbo"):
         except OSError:
             pass
     set_state(status, "Done", 100, "Transcript ready", 4, resumed)
+    print("Transcript ready: %d lines" % len(rows))
 
 
 if __name__ == "__main__":

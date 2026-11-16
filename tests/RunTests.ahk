@@ -35,6 +35,7 @@ Tests := [
     ["Transcribing goes on while the app reads its progress (#7)", TestStatusWhileRead],
     ["A recording is transcribed on this PC into Others and Me, and picks up where it stopped (#7, #12)", TestTranscribeSpeech],
     ["Transcribing shows its steps, a moving bar while getting ready, and a ring on the tray icon (#12)", TestTranscribeProgress],
+    ["A model download shows how much is done, and a stuck word-timing download is skipped (#16)", TestModelDownload],
     ["Recording saved window says what is new and offers to transcribe again (#8)", TestNoticeView],
     ["Tray menu shows transcribing, recordings, Help and About (#8)", TestTrayMenu],
     ["Tray menu › Recordings lists the newest recordings to open (#11)", TestRecentRecordings],
@@ -652,7 +653,38 @@ TestTranscribeSpeech() {
         Check(InStr(FileRead(TranscriptPath(wav, "srt"), "UTF-8"), "Me: "), "Subtitles were not written")
         ; #10: half the logical cores is as fast as all but one, and leaves the PC free for the call.
         threads := Max(1, EnvGet("NUMBER_OF_PROCESSORS") // 2)
-        Check(RegExMatch(FileRead(status ".log", "UTF-8"), "m)^Threads: " threads "$"), "The transcriber did not use " threads " threads")
+        Check(RegExMatch(log, "m)^\d\d:\d\d:\d\d Threads: " threads "$"), "The transcriber did not use " threads " threads")
+        ; #16: a try that hung left nothing to go on. Every line has its time, each stage says how
+        ; long it took, and the log of the first try is kept when the second one starts.
+        StrReplace(log, "=== Transcribing ", , , &tries)
+        Check(tries = 2, "The log must keep both tries, but has " tries ":`n" SubStr(log, 1, 1500))
+        Check(!RegExMatch(log, "m)^(?!\d\d:\d\d:\d\d )\S.*$", &bare), "A log line has no time: " (IsObject(bare) ? bare[0] : ""))
+        Check(RegExMatch(log, "m)^\d\d:\d\d:\d\d Speech model ready in \d+\.\d s$"), "The log does not say how long loading the speech model took:`n" SubStr(log, 1, 1500))
+    } finally {
+        try DirDelete(tmp, true)
+    }
+}
+; #16: transcribing sat at "Loading the speech model" for 30 minutes while a 3.85 GB word-timing
+; model downloaded unseen. A download now says how much is done, and when the word-timing model
+; makes no progress, the transcript goes on without it. A failed download says why.
+TestModelDownload() {
+    py := FindTranscriber(EnvGet("LOCALAPPDATA"))
+    if py = "" {
+        Out("      skipped: WhisperX is not installed on this PC")
+        return
+    }
+    tmp := A_Temp "\MeetingRecorder-test-" A_TickCount
+    DirCreate(tmp)
+    try {
+        job := ComObject("WScript.Shell").Exec(Q(py) " -I " Q(Root "\tests\FetchTest.py") " " Q(Root) " " Q(tmp))
+        start := A_TickCount
+        while !job.Status && A_TickCount - start < 60000
+            Sleep(100)
+        out := job.StdOut.ReadAll(), err := job.StdErr.ReadAll()
+        Check(RegExMatch(out, "m)^grew True .*Downloading the test model: [1-4] of 4 MB"), "The download did not show how much was done:`n" out err)
+        Check(RegExMatch(out, "m)^stuck False ([2-9])$"), "A stuck download was not given up after 2 s:`n" out err)
+        Check(InStr(out, "no progress"), "The log does not say the download made no progress:`n" out err)
+        Check(InStr(out, "failed no network"), "A failed download must pass on its error:`n" out err)
     } finally {
         try DirDelete(tmp, true)
     }
@@ -786,6 +818,11 @@ TestTranscribeProgress() {
     Check(TrayStatusText("Working", 42, 4) = "Transcribing: 42% done", "Tray menu while writing: " TrayStatusText("Working", 42, 4))
     Check(TranscribeTip(0, 1, "Loading the speech model") = "Transcribing: getting ready, loading the speech model", "Tooltip while loading: " TranscribeTip(0, 1, "Loading the speech model"))
     Check(TranscribeTip(42.4, 4, "Writing down what you said") = "Transcribing: 42%, writing down what you said", "Tooltip while writing: " TranscribeTip(42.4, 4, "Writing down what you said"))
+    ; #16: a model download took half an hour unseen. The window says it is downloading, and how much is done.
+    for c in [["Working", "Downloading the speech model: 0.4 of 1.6 GB", "Downloading the speech model: 0.4 of 1.6 GB...  3 min so far. Click Hide to keep working."]
+        , ["Working", "Loading the speech model", "3 min so far. Click Hide to keep working."]
+        , ["Installing", "Getting the transcriber ready", "Getting the transcriber ready...  3 min so far. Click Hide to keep working."]]
+        Check(TranscribeStatusText(c[1], c[2], 3) = c[3], "Window status for '" c[2] "' was: " TranscribeStatusText(c[1], c[2], 3))
 
     ; The ring on the icon, read from its pixels: white where it has filled, grey where it has not.
     s := 32, right := [27, 16], left := [5, 16], bottomRight := [24, 24], topLeft := [8, 8]

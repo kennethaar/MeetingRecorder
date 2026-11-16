@@ -3,7 +3,7 @@
 Persistent
 ; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
 TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
-AppVersion := "0.9.0"
+AppVersion := "0.9.1"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -1011,6 +1011,12 @@ AnnounceTranscript() {
   TrayTip(name, TxState = "Error" ? "Transcription failed" : "Transcript ready", 0x24)
  }
 }
+; The line under the steps while transcribing. Setup and model downloads say what they are
+; doing and how far they are, since they can take long (#16).
+TranscribeStatusText(state, detail, minutes) {
+ shown := state = "Installing" || InStr(detail, "Downloading") = 1
+ return (shown ? detail "...  " : "") minutes " min so far. Click Hide to keep working."
+}
 StopTranscriber() {
  global TxState, TxPid
  SetTimer(TranscribePoll, 0)
@@ -1043,7 +1049,7 @@ ShowTranscribeState() {
   bar.Visible := busy
  }
  if busy
-  status.Text := (TxState = "Installing" ? TxDetail "...  " : "") (A_TickCount - TxStart)//60000 " min so far. Click Hide to keep working."
+  status.Text := TranscribeStatusText(TxState, TxDetail, (A_TickCount - TxStart)//60000)
  else if tx = "failed"
   status.Text := TxDetail
  status.Visible := busy || tx = "failed"
@@ -1400,7 +1406,7 @@ HelpTopics() {
                 ["Saved.Hide", "Hide. Transcribing goes on."],
             ],
             view: "Saved",
-            more: "Others is what you heard. Me is your microphone. Getting ready takes a few minutes, so the bar moves by itself until there is a percent. If transcribing stops, Try again picks up where it stopped: a finished part is kept. Transcribe again replaces the transcript you have. To get this window back, choose the recording under Recordings in the tray menu. The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. A pause of 2 seconds starts a new paragraph with its own time. If the recording is named after an Outlook meeting, its title and the names of the people invited help spell names right. They are kept in %LOCALAPPDATA%\MeetingRecorder\meetings.ini. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. Fast suits English and takes about as long as the meeting lasted. For a meeting in another language, pick Accurate under Transcribe with in Settings; it takes about twice as long and needs more memory. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
+            more: "Others is what you heard. Me is your microphone. Getting ready takes a few minutes, so the bar moves by itself until there is a percent. If transcribing stops, Try again picks up where it stopped: a finished part is kept. Transcribe again replaces the transcript you have. To get this window back, choose the recording under Recordings in the tray menu. The transcript is saved next to the recording, as a .txt file and as an .srt subtitle file for a media player. A pause of 2 seconds starts a new paragraph with its own time. If the recording is named after an Outlook meeting, its title and the names of the people invited help spell names right. They are kept in %LOCALAPPDATA%\MeetingRecorder\meetings.ini. The first time, the app downloads the transcriber, about 5 GB. If PodcastClipper's WhisperX is on this PC, that one is used. A meeting in a new language may need a word-timing model first; the window says how much of it is downloaded. If that download stops, the transcript is made without it. Each try is written down in %LOCALAPPDATA%\MeetingRecorder\transcribe.ini.log. Fast suits English and takes about as long as the meeting lasted. For a meeting in another language, pick Accurate under Transcribe with in Settings; it takes about twice as long and needs more memory. With speakers instead of a headset, your microphone also hears the others, so some of their words can show up as Me.",
         },
         {
             id: "tray",

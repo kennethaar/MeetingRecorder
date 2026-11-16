@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.1 - 2026-11-16
+
+- Transcribe a recording: When a speech model has to be downloaded first, the
+  window says so and shows how much is done, instead of "Loading the speech
+  model" for half an hour. If the word-timing model download stops, the
+  transcript is made without it. Each try is logged with times in
+  transcribe.ini.log (#16).
+
 ## 0.9.0 - 2026-11-14
 
 - Transcribe a recording: Transcribing is about twice as fast and uses less
