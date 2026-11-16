@@ -298,7 +298,9 @@ accessibility and management by exception:
 - The recording panel never takes focus (`+E0x08000000`, `NoActivate`) and
   cannot be closed while recording. Keep it that way: the user is typing in a
   call.
-- Recording is always manual and visible. Never start a recording silently.
+- Recording is always visible. Never start a recording silently. The only
+  automatic start is a Teams call (#17): the panel shows Recording with Keep
+  recording and Discard while the call is on, and no answer keeps it.
 
 ## Technical constraints
 
@@ -325,8 +327,8 @@ accessibility and management by exception:
 - Default shortcut `^!r` (Ctrl+Alt+R) toggles recording. Configurable.
 - Settings: `%LOCALAPPDATA%\MeetingRecorder\settings.ini`.
   `[Settings]` `Folder`, `Shortcut`, `Latest` (last saved file),
-  `CloudNotice` (obsolete, from the removed Word handoff; ignored), `Detect` (offer to record
-  Teams calls, default 1), `Calendar` (name files after the classic Outlook
+  `CloudNotice` (obsolete, from the removed Word handoff; ignored), `Detect` (record
+  Teams calls when they start, default 1), `Calendar` (name files after the classic Outlook
   meeting, default 1); `[UI]` `X`, `Y` (panel).
   Missing keys fall back to defaults; add new keys the same way.
 - IPC, also in `%LOCALAPPDATA%\MeetingRecorder`: `status.ini`
@@ -340,12 +342,13 @@ accessibility and management by exception:
   into `<recording>.txt` and `.srt` next to the WAV (left = Others,
   right = Me). Transcripts may be rewritten; recordings never.
 - Teams calls: `DetectCall()` runs every 2 s. A call is active when Windows'
-  microphone ConsentStore shows Teams with `LastUsedTimeStop = 0`. It only
-  offers to record. Meeting names come from classic Outlook via
+  microphone ConsentStore shows Teams with `LastUsedTimeStop = 0`. It starts
+  a recording at once when the app is ready (`CallPhase` "Started"; #17). Meeting names come from classic Outlook via
   `ComObjActive` (never started by the app; new Outlook has no COM).
 - Recordings: `<Folder>\yyyy-MM-dd HHmmss - <meeting or Recording> - <8 hex>.partial.wav`
   while recording, then renamed to `.wav`, ` - Incomplete.wav`, or (startup
   recovery) ` - Recovered incomplete.wav`. Format: 44-byte PCM header,
   48 kHz, 16-bit, stereo (left = output, right = microphone), max 5 hours.
 - Never delete or overwrite a recording. Recovery keeps the original when it
-  cannot repair it.
+  cannot repair it. The one exception: Discard on a recording started for a
+  Teams call moves that file to the Recycle Bin (#17).

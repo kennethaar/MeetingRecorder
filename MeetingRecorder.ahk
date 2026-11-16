@@ -3,7 +3,7 @@
 Persistent
 ; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
 TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
-AppVersion := "0.9.2"
+AppVersion := "0.10.0"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -19,8 +19,10 @@ MicrophoneName := IniRead(Config, "Settings", "MicrophoneName", "")
 ; Speech model for Transcribe (#15): large-v3-turbo (Fast) or large-v3 (Accurate).
 SpeechModel := IniRead(Config, "Settings", "Model", "large-v3-turbo") = "large-v3" ? "large-v3" : "large-v3-turbo"
 InCall := false        ; a Teams call is using the microphone
-Offering := false      ; the panel offers to record that call
-CallEnded := false     ; the call ended while recording; the panel offers Stop or Keep recording
+; The recording and the Teams call (#17): "Started" = started for a call, Keep recording or
+; Discard; "Ended" = the call ended while recording, Stop or Keep recording; "" = no question.
+CallPhase := ""
+Discarding := false    ; Discard was clicked; the saved file goes to the Recycle Bin
 MeetingTitle := ""     ; the Outlook meeting for the current call, or ""
 MeetingPeople := ""    ; its attendees, for the transcript hint (#10)
 PanelWasVisible := false
@@ -42,12 +44,12 @@ TxSegmentsPath := AppDir "\transcribe.tsv"
 TxSetupPath := AppDir "\transcriber-setup.ini"
 Panel := MakePanel()
 Action := Panel["Action"]
-Action.OnEvent("Click", Toggle)
+Action.OnEvent("Click", ActionClick)
 SettingsButton := Panel["Settings"]
 SettingsButton.OnEvent("Click", Settings)
 NotNow := Panel["NotNow"]
 NotNow.OnEvent("Click", NotNowClick)
-Panel.OnEvent("Close", (*) => Offering ? EndOffer() : Panel.Hide())
+Panel.OnEvent("Close", (*) => Panel.Hide())
 OnMessage(0x0010, PreventRecordingClose)
 OnMessage(0x0232, RememberPosition)
 OnMessage(0x0218, PowerEvent)
@@ -68,15 +70,15 @@ Repair()
 SetTimer(Poll, 200)
 SetTimer(DetectCall, 2000)
 if !FileExist(Config) {
- MsgBox("Meeting Recorder records your calls on this PC. Start or stop with " ShortcutText() ".`n`nWhen a Teams call starts, it offers to record. It never records by itself.`n`nMuting yourself in the call may not mute the recording. Others are not told that you record, so follow the rules where you work.", "Welcome to Meeting Recorder", "Iconi")
+ MsgBox("Meeting Recorder records your calls on this PC. Start or stop with " ShortcutText() ".`n`nWhen a Teams call starts, it starts recording at once. Click Discard if you do not want it.`n`nMuting yourself in the call may not mute the recording. Others are not told that you record, so follow the rules where you work.", "Welcome to Meeting Recorder", "Iconi")
  Settings()
 }
 
 ; ---------------------------------------------------------------- windows (#9)
 ; Layout rules, checked by the layout test: the same margin all round, buttons at the bottom
 ; right, and no space held for hidden controls. Text that may be too long ends in "..." (0x4000).
-; The panel: what is happening, a quiet hint below it, and two buttons. Not now / Keep recording
-; takes the place of Settings while a Teams call is offered.
+; The panel: what is happening, a quiet hint below it, and two buttons. Discard / Keep recording
+; (vNotNow) takes the place of Settings while the panel asks about a Teams call.
 MakePanel() {
  g := Gui("+AlwaysOnTop +ToolWindow +E0x08000000", "Meeting Recorder")
  g.MarginX := 14, g.MarginY := 12
@@ -146,7 +148,7 @@ Toggle(*) {
  }
  if Child && ProcessExist(Child)
   return
- HideCallChoice()
+ SetCallPhase("")
  try {
   DirCreate(Folder)
   if DriveGetSpaceFree(Folder) < 512
@@ -182,12 +184,12 @@ StopRecording(*) {
  if State != "Recording" && State != "Starting"
   return
  FileAppend("stop",StopPath)
- HideCallChoice()
+ SetCallPhase("")
  State := "Saving"
  ShowState()
 }
 Poll() {
- global State, Child, StatusPath, StartTick, Action, Latest, Config, Closing, CallEnded, TxState, TxPercent, TxStep, TxDetail
+ global State, Child, StatusPath, StartTick, Action, Latest, Config, Closing, CallPhase, MeetingTitle, Discarding, PanelWasVisible, Panel, TxState, TxPercent, TxStep, TxDetail
  if FileExist(StatusPath) {
   s := IniRead(StatusPath,"Capture","State","")
   detail := IniRead(StatusPath,"Capture","Detail","")
@@ -197,15 +199,28 @@ Poll() {
   }
   if (s = "Saved" || s = "Incomplete") && (State = "Recording" || State = "Saving" || State = "Starting") {
    separator := InStr(detail," | ")
-   Latest := separator ? SubStr(detail,1,separator-1) : detail
+   wav := separator ? SubStr(detail,1,separator-1) : detail
+   SetCallPhase("")
+   ; Discard (#17): to the Recycle Bin, and the panel goes back to how it was. If that fails,
+   ; the recording is kept and shown as saved.
+   discard := Discarding
+   Discarding := false
+   if discard && DiscardRecording(wav) {
+    State := "Manual only"
+    ShowState()
+    Action.Text := "Start"
+    if !PanelWasVisible
+     Panel.Hide()
+    return
+   }
+   Latest := wav
    IniWrite(Latest,Config,"Settings","Latest")
-   HideCallChoice()
    State := "Manual only"
    SetStatus(s = "Saved" ? "Recording saved" : "Recording incomplete", "Start or stop: " ShortcutText())
    Action.Text := "Start"
    OpenNotice(Latest, s, separator ? SubStr(detail,separator+3) : "")
   } else if s = "Error" && State != "Attention required" {
-   HideCallChoice()
+   SetCallPhase(""), Discarding := false
    State := "Attention required"
    SetStatus("Recording failed", "Look in the recording folder for rescued audio.")
    Action.Text := "Start"
@@ -220,13 +235,14 @@ Poll() {
  if State = "Recording" {
   seconds := (A_TickCount-StartTick)//1000
   elapsed := Format("{:02}:{:02}:{:02}",seconds//3600,Mod(seconds//60,60),Mod(seconds,60))
-  SetStatus("Recording  " elapsed, CallEnded ? "The Teams call ended. Stop to save." : "Stop: " ShortcutText())
+  v := RecordingLines(elapsed, ShortcutText(), CallPhase, MeetingTitle)
+  SetStatus(v.status, v.hint)
   A_IconTip := "Meeting Recorder`nRecording: " elapsed
  } else A_IconTip := "Meeting Recorder`n" State (TxState = "Working" ? "`n" TranscribeTip(TxPercent, TxStep, TxDetail) : "")
  if Child && !ProcessExist(Child) {
   Child := 0
   if State = "Recording" || State = "Starting" || State = "Saving" || State = "Installing" {
-   HideCallChoice()
+   SetCallPhase(""), Discarding := false
    State := "Attention required"
    SetStatus("Recording stopped", "Look in the recording folder for rescued audio.")
    Action.Text := "Start"
@@ -746,7 +762,7 @@ MakeSettings(folder,shortcut,detect,calendar,outlook,mics := "",mic := "",micNam
  ; Speech model (#15): Fast (turbo) unless Accurate (large-v3) is stored.
  g.AddText("xm y+12 w440","Transcribe with")
  g.AddDropDownList("vModel y+4 w440 Choose" (model = "large-v3" ? 2 : 1),["Fast - best for English","Accurate - slower, best for other languages"])
- g.AddCheckbox("vDetect xm y+14 Checked" detect,"Offer to record when a Teams call starts")
+ g.AddCheckbox("vDetect xm y+14 Checked" detect,"Record when a Teams call starts")
  if outlook
   g.AddCheckbox("vCalendar y+8 Checked" calendar,"Name recordings after the meeting in classic Outlook")
  g.AddButton("vSave x264 y+18 w92 Default","Save")
@@ -1132,9 +1148,10 @@ Clock(seconds, withMs) {
 }
 
 ; ---------------------------------------------------------------- Teams calls and Outlook meetings
-; Every 2 s. Offers to record when a Teams call starts; never starts a recording by itself.
+; Every 2 s. A Teams call starts a recording at once, in view on the panel, so a late look at the
+; panel loses nothing (#17). Keep recording or Discard while the call is on; no answer keeps it.
 DetectCall() {
- global InCall, CallEnded, MeetingTitle, MeetingPeople, State, DetectOn, CalendarOn, Offering, NotNow
+ global InCall, MeetingTitle, MeetingPeople, State, DetectOn, CalendarOn, PanelWasVisible, Panel
  active := DetectOn && TeamsCallActive()
  if active = InCall
   return
@@ -1143,52 +1160,68 @@ DetectCall() {
   MeetingTitle := "", MeetingPeople := ""
   if CalendarOn
    MeetingTitle := PickMeeting(OutlookMeetings(), A_Now, &MeetingPeople)
-  if State = "Manual only"
-   OfferCall()
- } else if Offering {
-  EndOffer()
- } else if State = "Recording" || State = "Starting" {
-  CallEnded := true
-  ShowCallChoice("Keep recording")
-  ShowPanel()
+ }
+ switch CallAction(active, State) {
+  case "Start":
+   PanelWasVisible := DllCall("IsWindowVisible","Ptr",Panel.Hwnd)
+   Toggle()
+   if State = "Starting"
+    SetCallPhase("Started")
+  case "Ended":
+   SetCallPhase("Ended")
+   ShowPanel()
  }
 }
-OfferCall() {
- global Offering, PanelWasVisible, Panel, Action, MeetingTitle
- PanelWasVisible := DllCall("IsWindowVisible","Ptr",Panel.Hwnd)
- Offering := true
- SetStatus("Teams call started", MeetingTitle != "" ? MeetingTitle : "Record this call?")
- Action.Text := "Record"
- ShowCallChoice("Not now")
- ShowPanel()
+; What a Teams call starting or ending does: "Start" a recording, tell the panel the call
+; "Ended", or nothing ("") when the app is busy or not recording.
+CallAction(active, state) {
+ if active
+  return state = "Manual only" ? "Start" : ""
+ return state = "Recording" || state = "Starting" ? "Ended" : ""
 }
-; Not now / Keep recording takes the place of Settings in the panel.
-ShowCallChoice(text) {
- global NotNow, SettingsButton
- NotNow.Text := text
- SettingsButton.Visible := false
- NotNow.Visible := true
+; The panel while recording. phase is CallPhase; other is the second button (Settings, or the
+; Discard / Keep recording button that takes its place).
+RecordingLines(elapsed, shortcut, phase, title) {
+ status := "Recording  " elapsed
+ if phase = "Started"
+  return {status: status, hint: "Started for the Teams call" (title = "" ? "" : " · " title), action: "Keep recording", other: "Discard"}
+ if phase = "Ended"
+  return {status: status, hint: "The Teams call ended. Stop to save.", action: "Stop", other: "Keep recording"}
+ return {status: status, hint: "Stop: " shortcut, action: "Stop", other: "Settings"}
 }
-; Not now, or the call ended before recording: back to how the panel was.
-EndOffer(*) {
- global Offering, PanelWasVisible, Panel, Action
- HideCallChoice()
- Action.Text := "Start"
- ShowState()
- if !PanelWasVisible
-  Panel.Hide()
+SetCallPhase(phase) {
+ global CallPhase, Action, NotNow, SettingsButton
+ CallPhase := phase
+ v := RecordingLines("", "", phase, "")
+ Action.Text := v.action
+ NotNow.Text := v.other
+ NotNow.Visible := phase != ""
+ SettingsButton.Visible := phase = ""
+}
+ActionClick(*) {
+ global CallPhase
+ if CallPhase = "Started"
+  SetCallPhase("")   ; Keep recording
+ else Toggle()
 }
 NotNowClick(*) {
- global CallEnded
- if CallEnded
-  HideCallChoice()   ; Keep recording
- else EndOffer()
+ global CallPhase, Discarding
+ if CallPhase != "Started" {
+  SetCallPhase("")   ; Keep recording after the call ended
+  return
+ }
+ Discarding := true
+ StopRecording()
+ SetStatus("Discarding...", "")
 }
-HideCallChoice() {
- global Offering, CallEnded, NotNow, SettingsButton
- Offering := false, CallEnded := false
- NotNow.Visible := false
- SettingsButton.Visible := true
+; Moves a discarded recording to the Recycle Bin. True when it is gone from the folder.
+DiscardRecording(wav) {
+ if !FileExist(wav)
+  return false
+ try FileRecycle(wav)
+ catch
+  return false
+ return !FileExist(wav)
 }
 
 ; Teams is in a call when Windows says it is using the microphone now (LastUsedTimeStop = 0).
@@ -1340,21 +1373,23 @@ HelpTopics() {
         {
             id: "teams",
             title: "Teams calls",
-            words: "teams call meeting detect automatic offer outlook calendar name file",
-            what: "When a Teams call starts, the panel offers to record it. It never records by itself.",
+            words: "teams call meeting detect automatic start discard throw away delete keep outlook calendar name file",
+            what: "When a Teams call starts, recording starts at once, so you get the whole call. Click Discard if you do not want it.",
             steps: [
-                "Join a Teams call. The panel says Teams call started.",
-                "Click Record, or press Ctrl + Alt + R. Click Not now to skip this call.",
+                "Join a Teams call. The panel shows Recording.",
+                "Click Keep recording, or Discard to throw it away.",
+                "If you do nothing, the recording is kept.",
                 "When the call ends, click Stop to save, or Keep recording.",
             ],
             keys: [],
             legend: [
-                ["Panel.Status", "The call and its meeting name"],
-                ["Panel.Action", "Record the call"],
-                ["?Panel.NotNow", "Skip this call, or keep recording after it ends"],
+                ["Panel.Status", "Recording and how long"],
+                ["Panel.Hint", "The meeting name"],
+                ["Panel.Action", "Keep the recording, or Stop to save it"],
+                ["?Panel.NotNow", "Discard the recording, or keep recording after the call ends"],
             ],
             view: "Panel",
-            more: "A call is found when Teams uses your microphone. If classic Outlook is open, the file is named after the meeting that is on now. The app never starts Outlook. You can turn both off in Settings.",
+            more: "Discard moves the file to the Recycle Bin. A call is found when Teams uses your microphone. If classic Outlook is open, the file is named after the meeting that is on now. The app never starts Outlook. You can turn both off in Settings.",
         },
         {
             id: "settings",
@@ -1376,7 +1411,7 @@ HelpTopics() {
                 ["Settings.Microphone", "Your microphone"],
                 ["Settings.Level", "Moves when it hears you"],
                 ["Settings.Model", "Fast or accurate"],
-                ["Settings.Detect", "Offer to record Teams calls"],
+                ["Settings.Detect", "Record Teams calls when they start"],
                 ["?Settings.Calendar", "Name files after Outlook meetings"],
                 ["Settings.Save", "Save changes"],
                 ["Settings.Cancel", "Close without saving"],

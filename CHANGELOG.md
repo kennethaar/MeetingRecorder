@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.0 - 2026-11-16
+
+- Teams calls: Recording starts as soon as a Teams call starts, so you get the
+  whole call even if you see the panel late. Click Keep recording, or Discard
+  to move it to the Recycle Bin. If you do nothing, it is kept (#17).
+
 ## 0.9.2 - 2026-11-16
 
 - Transcribe a recording: Transcribing starts at once, while the word-timing

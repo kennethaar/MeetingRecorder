@@ -26,6 +26,7 @@ Tests := [
     ["Recording uses the chosen microphone, or the Windows default when it is missing (#14)", TestMicRecording],
     ["Settings lets you pick the speech model, Fast by default, and Transcribe uses it (#15)", TestModelSettings],
     ["Teams call is found from microphone use (#5)", TestTeamsDetection],
+    ["A Teams call is recorded at once: Keep or Discard, and kept if you never answer (#17)", TestCallRecordsAtOnce],
     ["Recording is named after the meeting running now (#5)", TestMeetingName],
     ["Outlook dates are read in any locale (#5)", TestComDate],
     ["Questions from the Recording saved window show on top of it (#6)", TestNoticeBoxOnTop],
@@ -402,6 +403,43 @@ TestTeamsDetection() {
         Check(TeamsCallActive(base), "Classic Teams is using the microphone, but no call was found")
     } finally {
         RunWait(A_ComSpec ' /c reg delete "HKCU\Software\MeetingRecorder-tests" /f', , "Hide")
+    }
+}
+
+; #17: the offer was easy to miss, and the start of the call was lost. A Teams call now starts a
+; recording at once. While the call is on, the panel asks Keep recording or Discard; no answer
+; keeps it. Discard moves only that file to the Recycle Bin.
+TestCallRecordsAtOnce() {
+    Check(CallAction(true, "Manual only") = "Start", "A Teams call started while ready, but recording did not start")
+    for state in ["Recording", "Starting", "Saving", "Installing", "Attention required"]
+        Check(CallAction(true, state) = "", "A Teams call started while " state ", but the app acted on it")
+    for state in ["Recording", "Starting"]
+        Check(CallAction(false, state) = "Ended", "The call ended while " state ", but the panel was not told")
+    Check(CallAction(false, "Manual only") = "", "The call ended while ready, but the app acted on it")
+
+    S(v) => v.status " / " v.hint " / [" v.action "] [" v.other "]"
+    v := RecordingLines("00:00:12", "Ctrl + Alt + R", "Started", "Weekly sync")
+    Check(S(v) = "Recording  00:00:12 / Started for the Teams call " Chr(0xB7) " Weekly sync / [Keep recording] [Discard]", "Started for a call: " S(v))
+    v := RecordingLines("00:00:12", "Ctrl + Alt + R", "Started", "")
+    Check(v.hint = "Started for the Teams call", "Started for a call without a meeting: " S(v))
+    v := RecordingLines("00:05:00", "Ctrl + Alt + R", "", "Weekly sync")
+    Check(S(v) = "Recording  00:05:00 / Stop: Ctrl + Alt + R / [Stop] [Settings]", "Kept or manual: " S(v))
+    ; The call ended without an answer: kept, and Discard is gone.
+    v := RecordingLines("01:00:00", "Ctrl + Alt + R", "Ended", "Weekly sync")
+    Check(S(v) = "Recording  01:00:00 / The Teams call ended. Stop to save. / [Stop] [Keep recording]", "Call ended: " S(v))
+
+    dir := A_Temp "\MeetingRecorder-discard-" A_TickCount
+    DirCreate(dir)
+    try {
+        wav := dir "\2026-11-16 100000 - Weekly sync - 0A1B2C3D.wav"
+        other := dir "\2026-11-16 090000 - Recording - 11111111.wav"
+        FileAppend("call", wav), FileAppend("keep", other)
+        Check(DiscardRecording(wav), "Discard said it failed")
+        Check(!FileExist(wav), "Discarded recording is still in the folder")
+        Check(FileExist(other), "Discard removed another recording")
+        Check(!DiscardRecording(dir "\missing.wav"), "Discard of a missing file said it worked")
+    } finally {
+        DirDelete(dir, true)
     }
 }
 
@@ -916,9 +954,13 @@ TestWindowLayout() {
     wav := "C:\Rec\2026-11-13 082847 - Weekly planning with the product team and the design group - BFA76E00.wav"
     windows := []
     windows.Push(["Panel", MakePanel()])
-    p := MakePanel()
-    p["Settings"].Visible := false, p["NotNow"].Visible := true, p["NotNow"].Text := "Keep recording"
-    windows.Push(["Panel offering a call", p])
+    for phase in ["Started", "Ended"] {
+        v := RecordingLines("00:00:12", "Ctrl + Alt + R", phase, "Weekly planning with the product team and the design group")
+        p := MakePanel()
+        p["Status"].Text := v.status, p["Hint"].Text := v.hint, p["Action"].Text := v.action
+        p["Settings"].Visible := false, p["NotNow"].Visible := true, p["NotNow"].Text := v.other
+        windows.Push(["Panel, call " phase, p])
+    }
     windows.Push(["Recording saved", MakeNotice(wav, "Saved", "")])
     n := MakeNotice(wav, "Incomplete", "The microphone stopped working.")
     ShowSteps(n, 4, true, 72)
@@ -939,7 +981,7 @@ TestWindowLayout() {
             catch as e
                 problems .= "`n      " e.Message
         }
-        if DllCall("GetWindowLong", "Ptr", windows[5][2]["Folder"].Hwnd, "Int", -16, "Int") & 0x4
+        if DllCall("GetWindowLong", "Ptr", windows[6][2]["Folder"].Hwnd, "Int", -16, "Int") & 0x4
             problems .= "`n      Settings: the folder box must be one line"
         Check(problems = "", SubStr(problems, 8))
     } finally {
