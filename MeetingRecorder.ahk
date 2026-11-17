@@ -3,7 +3,7 @@
 Persistent
 ; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
 TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
-AppVersion := "0.10.0"
+AppVersion := "0.10.1"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -259,11 +259,8 @@ ShortcutText() {
 ; The Recording saved window: one recording and its transcript. kind is "Saved" or "Incomplete";
 ; note is why it is incomplete. Hide keeps transcribing; the tray menu brings it back (#8).
 OpenNotice(wav,kind,note:="") {
- global Completion, CompletionWav, CompletionKind
- if IsObject(Completion)
-  Completion.Destroy()
- CompletionWav := wav, CompletionKind := kind
- Completion := MakeNotice(wav,kind,note)
+ global Completion
+ ReplaceNotice(wav,kind,note)
  Completion["Transcribe"].OnEvent("Click",TranscribeClick)
  Completion["ShowFile"].OnEvent("Click",(*) => ShowInExplorer(CompletionWav))
  Completion["Again"].OnEvent("Click",TranscribeAgain)
@@ -272,6 +269,17 @@ OpenNotice(wav,kind,note:="") {
  Completion.OnEvent("Escape",HideNotice)
  ShowTranscribeState()
  Completion.Show("AutoSize NoActivate")
+}
+; Makes the new window before closing the old one, so the transcribing timer, which can run at any
+; moment, never updates a closed window (#18).
+ReplaceNotice(wav,kind,note) {
+ global Completion, CompletionWav, CompletionKind
+ n := MakeNotice(wav,kind,note)
+ old := Completion
+ Completion := n, CompletionWav := wav, CompletionKind := kind
+ if IsObject(old)
+  old.Destroy()
+ return n
 }
 ; Heading, the meeting name, when it was recorded (and why it is incomplete), the transcribing
 ; status and progress when there is any, then the buttons with Hide at the right.

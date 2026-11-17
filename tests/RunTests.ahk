@@ -38,6 +38,7 @@ Tests := [
     ["Transcribing shows its steps, a moving bar while getting ready, and a ring on the tray icon (#12)", TestTranscribeProgress],
     ["A model download shows how much is done and the time left; the word-timing model downloads in the background (#16)", TestModelDownload],
     ["Recording saved window says what is new and offers to transcribe again (#8)", TestNoticeView],
+    ["A new Recording saved window while transcribing shows no errors (#18)", TestNoticeReplaced],
     ["Tray menu shows transcribing, recordings, Help and About (#8)", TestTrayMenu],
     ["Tray menu › Recordings lists the newest recordings to open (#11)", TestRecentRecordings],
     ["Help and About windows show the topic and the version (#8)", TestHelpAndAbout],
@@ -752,6 +753,41 @@ TestNoticeView() {
     for name, kind in Map("C:\Rec\a - Recording - 1a2b3c4d.wav", "Saved", "C:\Rec\a - Recording - 1a2b3c4d - Incomplete.wav", "Incomplete"
         , "C:\Rec\a - Recording - 1a2b3c4d - Recovered incomplete.wav", "Incomplete")
         Check(RecordingKind(name) = kind, name " was taken as " RecordingKind(name))
+}
+
+; #18: a recording saved while another was transcribing showed "Gui has no window" errors. The old
+; window was closed before the new one was made, and the transcribing timer updated the closed one
+; in between. Whatever runs while a window is made or closed must find a window that is open.
+TestNoticeReplaced() {
+    global Completion := 0, CompletionWav := "", CompletionKind := ""
+    problems := []
+    Look(wParam, lParam, msg, hwnd) {
+        global Completion
+        if !IsObject(Completion)
+            return
+        try h := Completion.Hwnd
+        catch {
+            problems.Push("while a window was " (msg = 1 ? "made" : "closed") ", the app pointed at a closed window")
+            return
+        }
+        if msg = 2 && hwnd = h
+            problems.Push("the window the app shows was closed")
+    }
+    OnMessage(0x1, Look), OnMessage(0x2, Look)   ; WM_CREATE, WM_DESTROY
+    wavA := "C:\Rec\2026-11-17 090000 - Budget - 1A2B3C4D.wav"
+    wavB := "C:\Rec\2026-11-17 100000 - Market Demo - 5E6F7A8B.wav"
+    try {
+        first := ReplaceNotice(wavA, "Saved", "")
+        firstHwnd := first.Hwnd
+        second := ReplaceNotice(wavB, "Incomplete", "")
+        Check(!problems.Length, Join(problems))
+        Check(Completion = second && CompletionWav = wavB && CompletionKind = "Incomplete", "The app does not point at the new window")
+        Check(!WinExist("ahk_id " firstHwnd), "The old window is still open")
+    } finally {
+        OnMessage(0x1, Look, 0), OnMessage(0x2, Look, 0)
+        try Completion.Destroy()
+        Completion := 0
+    }
 }
 
 ; #8: Dismiss looked like it ended the transcription, and the tray showed no way back to it.

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.1 - 2026-11-17
+
+- Transcribe a recording: A recording saved while another one is being
+  transcribed no longer shows "Gui has no window" errors (#18).
+
 ## 0.10.0 - 2026-11-16
 
 - Teams calls: Recording starts as soon as a Teams call starts, so you get the
