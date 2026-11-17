@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.0 - 2026-11-17
+
+- Tray menu: Restart closes the app and starts it again. A recording that is
+  running is saved first (#19).
+
 ## 0.10.1 - 2026-11-17
 
 - Transcribe a recording: A recording saved while another one is being

@@ -3,7 +3,7 @@
 Persistent
 ; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
 TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
-AppVersion := "0.10.1"
+AppVersion := "0.11.0"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 Config := AppDir "\settings.ini"
@@ -32,6 +32,7 @@ StatusPath := AppDir "\status.ini"
 StopPath := AppDir "\stop.signal"
 StartTick := 0
 Closing := false
+Restarting := false   ; Tray menu › Restart: start again once Closing is done
 Completion := 0
 CompletionWav := ""    ; the recording the Recording saved window is about
 CompletionKind := ""   ; "Saved" or "Incomplete"
@@ -250,7 +251,7 @@ Poll() {
   }
  }
  if Closing && !Child
-  ExitApp()
+  Leave()
 }
 ShortcutText() {
  global Shortcut
@@ -481,6 +482,7 @@ BuildTrayMenu(m) {
  m.Add("About Meeting Recorder",ShowAbout)
  m.Add()
  m.Add("Repair audio backend",Repair)
+ m.Add("Restart",Restart)
  m.Add("Exit",Quit)
 }
 ; The top line of the tray menu while transcribing; "" when there is nothing to show.
@@ -914,8 +916,14 @@ Quit(*) {
  Closing := true
  StopRecording()
  if !Child
-  ExitApp()
+  Leave()
 }
+; Tray menu › Restart: like Exit (a recording is saved first), then the app starts again.
+Restart(*) {
+ global Restarting := true
+ Quit()
+}
+Leave() => Restarting ? Reload() : ExitApp()
 ExitHandler(reason,code) {
  global State, StopPath, Child
  if State = "Recording" || State = "Starting" || State = "Saving" {
@@ -1456,7 +1464,7 @@ HelpTopics() {
         {
             id: "tray",
             title: "Tray menu",
-            words: "tray icon menu notification area clock red dot open panel show window latest older earlier recent recordings help about version progress",
+            words: "tray icon menu notification area clock red dot open panel show window latest older earlier recent recordings help about version progress restart reload start again exit quit",
             what: "The red dot in the notification area, by the clock, is the app. Click it to open the panel. Right-click it for everything else.",
             steps: [
                 "Click the red dot to open the panel, or right-click it for the menu.",
@@ -1465,7 +1473,7 @@ HelpTopics() {
             ],
             keys: [],
             legend: [],
-            more: "Recordings lists the 8 newest recordings, newest first. Transcript at the right means it has one. For an older one, choose Other recording. While a recording is transcribed, the top line of the menu shows how far it has come. Click it to see the transcript window. If the red dot is hidden, click the arrow by the clock.",
+            more: "Recordings lists the 8 newest recordings, newest first. Transcript at the right means it has one. For an older one, choose Other recording. While a recording is transcribed, the top line of the menu shows how far it has come. Click it to see the transcript window. Restart closes the app and starts it again. A recording that is running is saved first. If the red dot is hidden, click the arrow by the clock.",
         },
         {
             id: "recovery",

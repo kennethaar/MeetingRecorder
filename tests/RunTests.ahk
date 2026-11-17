@@ -797,7 +797,7 @@ TestTrayMenu() {
     m := Menu()
     BuildTrayMenu(m)
     items := ["Open Meeting Recorder", "", "Start / stop recording", "Recordings", "Open recordings folder", ""
-        , "Settings", "Help", "About Meeting Recorder", "", "Repair audio backend", "Exit"]
+        , "Settings", "Help", "About Meeting Recorder", "", "Repair audio backend", "Restart", "Exit"]
     Check(Join(MenuLabels(m.Handle)) = Join(items), "Tray menu was: " Join(MenuLabels(m.Handle)))
     Check(DllCall("GetMenuDefaultItem", "Ptr", m.Handle, "UInt", 1, "UInt", 0, "Int") = 0, "Open Meeting Recorder is not the default (click) item")
     Check(RegExMatch(FileRead(Root "\MeetingRecorder.ahk", "UTF-8"), "m)^A_TrayMenu\.ClickCount := 1\s*$"), "A single click on the tray icon must open the panel")
@@ -1160,6 +1160,7 @@ ShowHelp(*) => 0
 ShowAbout(*) => 0
 Repair(*) => 0
 Quit(*) => 0
+Restart(*) => 0
 ShowTranscribing(*) => 0
 ShowPanel(*) => 0
 
