@@ -12,6 +12,12 @@ there is no build artifact.
   `Capture.cs` (capture engine), `Transcribe.py` (WhisperX transcription,
   run by the portable Python it finds). Tools live in `tools/`.
   Generated files: `WhatsNew.generated.ahk`. Never edit generated files directly.
+  Their diffs after a generator run are expected: check them with
+  `git diff --stat`, not in full.
+- The tree sits in OneDrive. `.gitattributes` normalizes line endings, so
+  `LF will be replaced by CRLF` warnings are harmless noise; do not try to
+  fix them. Never commit OneDrive conflict copies (`*-LG2375JTB.*`,
+  `*-HY-*.*`; `.gitignore` hides them).
 - Build with: nothing to build. `Backend.ps1` compiles `Capture.cs` in memory
   at each launch. The test suite checks that the AHK script loads.
 - Run with: `& "$env:ProgramFiles\AutoHotkey\v2\AutoHotkey64.exe" MeetingRecorder.ahk`
@@ -240,13 +246,21 @@ that each selector's view matches the topic and that the v-name is declared.
 
 Every user-requested change needs an issue in `kennethaar/MeetingRecorder`.
 
-1. Search existing issues first.
+0. Write issues and comments in generic text: no real names, people,
+   employers, meeting titles, places or words copied from the user's
+   recordings, transcripts, calendar, logs or screenshots. Use neutral
+   stand-ins such as "a long meeting name" or "Person A".
+1. Search existing issues first. Before creating an issue or adding to one,
+   show the user its title and body and wait for their OK, so they can see
+   the request was understood.
 2. Reopen and reuse an issue for a follow-up, regression or related
    correction.
 3. Create a new issue only for distinct new behavior (label `enhancement` or
    `bug`).
 4. Each commit references one issue with `Fixes #N`.
-5. Commit locally. Push to `main` only after the full test run passes.
+5. Commit locally. Push to `main` only after the full test run passes. This
+   holds in cloud sessions too, even when the session names a branch of its
+   own.
 6. Comment `Fixed in <short-sha>.` (or `Fixed in vX.Y.Z.`) on the issue.
 
 Use `gh` if it is installed (on this PC it is not yet). Otherwise use the
@@ -265,11 +279,15 @@ Store temporary JSON only in `$SCRATCH`, never in the repository.
 
 ## Working agreements
 
-- **New features: mockups first.** Before implementing a new feature, show
-  3 different ASCII mockups of the UI or flow and let the user pick one. Write
-  no implementation code until a mockup is chosen.
+- **Mockups first.** Before implementing a new feature or changing
+  user-facing text or UX, show 3 different ASCII mockups of the UI or flow
+  and let the user pick one. Write no implementation code until a mockup is
+  chosen.
 - **Focused changes.** Do not redesign unrelated parts during a focused
   change.
+- **Suggest UX fixes.** When a task touches a screen, briefly list the UI/UX
+  problems you see there and the fix you recommend. Suggestions outside the
+  task stay suggestions: build them only after the user agrees.
 - **Ask, don't assume.** When setup depends on the user's own conventions,
   ask. Do not preselect personal conventions.
 - **Offer only what works.** Show a choice only when it can work. Let users
@@ -281,12 +299,16 @@ Apply Steve Krug's "Don't Make Me Think", progressive disclosure,
 accessibility and management by exception:
 
 - Make things self-evident. Labels, buttons and actions are obvious without
-  explanation.
+  explanation. If something needs an explanation, fix the design before
+  adding text.
 - Use plain, familiar wording. No jargon or clever names.
-- Reduce choices and noise. Omit needless words and controls. No body text
-  that repeats the title.
-- Make clickable things look clickable. Make the default action obvious.
-  Use one clear control per action.
+- Reduce choices and noise. Cut words in half, then cut half of what's left.
+  No happy talk, no body text that repeats the title.
+- Make clickable things look clickable. Users click the first reasonable
+  option, so make the right one the most obvious. Use one clear control per
+  action. Doubt per click matters more than the number of clicks.
+- Always show where the user is and how to get back. Keep their goodwill:
+  no hidden needed info, no forced formats, easy recovery from mistakes.
 - Follow conventions users already know.
 - Design for scanning: clear visual hierarchy, short text.
 - Prevent errors. When they happen, say plainly what went wrong and how to

@@ -4,3 +4,7 @@ settings.ini
 status.ini*
 backend-*/
 *.zip
+__pycache__/
+# OneDrive conflict copies
+*-LG2375JTB.*
+*-HY-*.*
