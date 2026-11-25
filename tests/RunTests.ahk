@@ -25,6 +25,7 @@ Tests := [
     ["Settings lets you pick the microphone and shows how loud it is (#14)", TestMicSettings],
     ["Recording uses the chosen microphone, or the Windows default when it is missing (#14)", TestMicRecording],
     ["Settings lets you pick the speech model, Fast by default, and Transcribe uses it (#15)", TestModelSettings],
+    ["Start with Windows is on by default and keeps a shortcut in the Startup folder (#20)", TestStartWithWindows],
     ["Teams call is found from microphone use (#5)", TestTeamsDetection],
     ["A Teams call is recorded at once: Keep or Discard, and kept if you never answer (#17)", TestCallRecordsAtOnce],
     ["Recording is named after the meeting running now (#5)", TestMeetingName],
@@ -324,6 +325,36 @@ TestModelSettings() {
     Check(SubStr(cmd, -11) = ' "large-v3"', "The model must be the last argument: " cmd)
     cmd := TranscribeCommand("py.exe", "C:\App", "C:\Rec\a.wav", "s.ini", "t.tsv")
     Check(SubStr(cmd, -17) = ' "large-v3-turbo"', "Without a choice, Transcribe must use turbo: " cmd)
+}
+
+; #20: the app did not start with Windows: it had no such choice and nothing started it.
+; Settings shows Start with Windows, checked unless turned off; the app keeps a shortcut to this
+; script in the Startup folder, moves it with the script, and removes it when turned off.
+TestStartWithWindows() {
+    src := FileRead(Root "\MeetingRecorder.ahk", "UTF-8")
+    Check(RegExMatch(src, 'm)^StartupOn := IniRead\(Config, "Settings", "Startup", 1\) = 1\s*$'), "Start with Windows must be on unless settings.ini says Startup=0")
+    for on in [true, false] {
+        g := MakeSettings("C:\Rec", "^!r", true, true, false, "", "", "", "", on)
+        try Check(g["Startup"].Type = "CheckBox" && g["Startup"].Text = "Start with Windows" && g["Startup"].Value = on, "Settings must show 'Start with Windows' " (on ? "checked" : "unchecked"))
+        finally g.Destroy()
+    }
+    dir := A_Temp "\MeetingRecorder-tests\startup-" A_TickCount
+    DirCreate(dir)
+    link := dir "\Meeting Recorder.lnk", script := Root "\MeetingRecorder.ahk"
+    try {
+        Check(SetStartWithWindows(true, link, script) != "" && FileExist(link), "Turning it on must add the shortcut")
+        FileGetShortcut(link, &target, &workDir, &args)
+        Check(target = A_AhkPath && args = Q(script) && workDir = Root, "Shortcut must start this script: " target " " args " in " workDir)
+        Check(SetStartWithWindows(true, link, script) = "", "A shortcut that is right must be left as it is")
+        moved := dir "\Moved\MeetingRecorder.ahk"
+        SetStartWithWindows(true, link, moved)
+        FileGetShortcut(link, , , &args)
+        Check(args = Q(moved), "Shortcut must follow the script when it moves: " args)
+        Check(SetStartWithWindows(false, link, moved) != "" && !FileExist(link), "Turning it off must remove the shortcut")
+        Check(SetStartWithWindows(false, link, moved) = "", "Off twice must change nothing")
+    } finally {
+        try DirDelete(dir, true)
+    }
 }
 
 TestMicRecording() {

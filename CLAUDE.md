@@ -329,7 +329,11 @@ accessibility and management by exception:
   `[Settings]` `Folder`, `Shortcut`, `Latest` (last saved file),
   `CloudNotice` (obsolete, from the removed Word handoff; ignored), `Detect` (record
   Teams calls when they start, default 1), `Calendar` (name files after the classic Outlook
-  meeting, default 1); `[UI]` `X`, `Y` (panel).
+  meeting, default 1), `Startup` (keep `Meeting Recorder.lnk` in the Startup folder, checked at
+  every start, default 1; #20); `[UI]` `X`, `Y` (panel).
+- Log: `%LOCALAPPDATA%\MeetingRecorder\MeetingRecorder.log`, written by the app (`AppLog()`),
+  `Backend.ps1` (`Write-Log`) and `Capture.cs` (`Log`) as `yyyy-MM-dd HH:mm:ss.fff [source] text`.
+  The app rotates it at 1 MB to `.1.log`..`.3.log` (#21).
   Missing keys fall back to defaults; add new keys the same way.
 - IPC, also in `%LOCALAPPDATA%\MeetingRecorder`: `status.ini`
   (`[Capture]` `State`, `Detail`; replaced atomically, UTF-16) and

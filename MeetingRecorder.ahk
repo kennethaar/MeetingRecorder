@@ -3,7 +3,7 @@
 Persistent
 ; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
 TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
-AppVersion := "0.12.0"
+AppVersion := "0.13.0"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
 ; What the app, Backend.ps1 and the capture engine did, to find out what went wrong (#21).
@@ -16,6 +16,9 @@ Shortcut := IniRead(Config, "Settings", "Shortcut", "^!r")
 Latest := IniRead(Config, "Settings", "Latest", "")
 DetectOn := IniRead(Config, "Settings", "Detect", 1) = 1
 CalendarOn := IniRead(Config, "Settings", "Calendar", 1) = 1
+; Start with Windows (#20): a shortcut in the Startup folder, checked at every start.
+StartupOn := IniRead(Config, "Settings", "Startup", 1) = 1
+StartupLink := A_Startup "\Meeting Recorder.lnk"
 ; Microphone for Me (#14): device id, or "" for the Windows default. The name is kept to show it
 ; while it is not connected.
 Microphone := IniRead(Config, "Settings", "Microphone", "")
@@ -69,6 +72,11 @@ catch as e {
  AppLog("Shortcut " Shortcut " is unavailable: " e.Message)
  MsgBox("Shortcut unavailable. Choose another in Settings.", "Meeting Recorder")
 }
+try {
+ if (change := SetStartWithWindows(StartupOn, StartupLink)) != ""
+  AppLog(change)
+} catch as e
+ AppLog("Start with Windows could not be set: " e.Message)
 DirCreate(Folder)
 ; Recover before starting another capture. Recovery never deletes the source on failure.
 RunWait(PSCommand("Recover") " -Output " Q(Folder),, "Hide")
@@ -694,6 +702,24 @@ OpenFolder(*) {
  global Folder
  Run("explorer.exe " Q(Folder))
 }
+; Start with Windows (#20): keeps the Startup folder shortcut to this script, or removes it.
+; Returns what it changed, or "" when the shortcut was already right.
+SetStartWithWindows(on, link, script := A_ScriptFullPath) {
+ if !on {
+  if !FileExist(link)
+   return ""
+  FileDelete(link)
+  return "Start with Windows: shortcut removed"
+ }
+ SplitPath(script,, &dir)
+ if FileExist(link) {
+  FileGetShortcut(link, &target, &workDir, &args)
+  if target = A_AhkPath && args = Q(script) && workDir = dir
+   return ""
+ }
+ FileCreateShortcut(A_AhkPath, link, dir, Q(script), "Meeting Recorder", dir "\MeetingRecorder.ico")
+ return "Start with Windows: shortcut set to " script
+}
 ; ---------------------------------------------------------------- log file (#21)
 AppLog(text) => WriteLog(LogPath, text)
 OpenLog(*) {
@@ -726,9 +752,9 @@ Settings(*) {
   return
  }
  ; Only offered when classic Outlook is installed; new Outlook has no local calendar access.
- g := MakeSettings(Folder,Shortcut,DetectOn,CalendarOn,OutlookInstalled(),MicList(),Microphone,MicrophoneName,SpeechModel)
+ g := MakeSettings(Folder,Shortcut,DetectOn,CalendarOn,OutlookInstalled(),MicList(),Microphone,MicrophoneName,SpeechModel,StartupOn)
  open := g.Hwnd
- f := g["Folder"], h := g["Shortcut"], d := g["Detect"]
+ f := g["Folder"], h := g["Shortcut"], d := g["Detect"], st := g["Startup"]
  c := 0
  try c := g["Calendar"]
  ; The level bar (#14) follows the microphone picked in the list.
@@ -750,7 +776,7 @@ Settings(*) {
   g.Destroy()
  }
  SaveSettings(*) {
-  global Folder, Shortcut, Config, DetectOn, CalendarOn, Microphone, MicrophoneName, SpeechModel
+  global Folder, Shortcut, Config, DetectOn, CalendarOn, Microphone, MicrophoneName, SpeechModel, StartupOn
   try {
    newKey := h.Value
    if newKey = ""
@@ -775,7 +801,11 @@ Settings(*) {
    IniWrite(MicrophoneName,Config,"Settings","MicrophoneName")
    SpeechModel := ModelChoice(g)
    IniWrite(SpeechModel,Config,"Settings","Model")
-   AppLog("Settings saved: folder " Folder ", shortcut " Shortcut ", Teams " DetectOn ", Outlook " CalendarOn ", microphone " (Microphone = "" ? "Windows default" : MicrophoneName) ", model " SpeechModel)
+   StartupOn := st.Value = 1
+   IniWrite(StartupOn ? 1 : 0,Config,"Settings","Startup")
+   if (change := SetStartWithWindows(StartupOn,StartupLink)) != ""
+    AppLog(change)
+   AppLog("Settings saved: folder " Folder ", shortcut " Shortcut ", start with Windows " StartupOn ", Teams " DetectOn ", Outlook " CalendarOn ", microphone " (Microphone = "" ? "Windows default" : MicrophoneName) ", model " SpeechModel)
    CloseSettings()
   } catch as e {
    AppLog("Settings not saved: " e.Message)
@@ -784,7 +814,7 @@ Settings(*) {
  }
 }
 ; Folder with Browse beside it, the shortcut, the Teams choices, then Save and Cancel.
-MakeSettings(folder,shortcut,detect,calendar,outlook,mics := "",mic := "",micName := "",model := "") {
+MakeSettings(folder,shortcut,detect,calendar,outlook,mics := "",mic := "",micName := "",model := "",startup := true) {
  ; Microphones (#14): a stored one that is not connected now stays listed, so Save keeps it.
  list := IsObject(mics) ? mics.Clone() : [{id: "", name: "Windows default"}]
  pick := 1
@@ -815,7 +845,8 @@ MakeSettings(folder,shortcut,detect,calendar,outlook,mics := "",mic := "",micNam
  ; Speech model (#15): Fast (turbo) unless Accurate (large-v3) is stored.
  g.AddText("xm y+12 w440","Transcribe with")
  g.AddDropDownList("vModel y+4 w440 Choose" (model = "large-v3" ? 2 : 1),["Fast - best for English","Accurate - slower, best for other languages"])
- g.AddCheckbox("vDetect xm y+14 Checked" detect,"Record when a Teams call starts")
+ g.AddCheckbox("vStartup xm y+14 Checked" startup,"Start with Windows")
+ g.AddCheckbox("vDetect y+8 Checked" detect,"Record when a Teams call starts")
  if outlook
   g.AddCheckbox("vCalendar y+8 Checked" calendar,"Name recordings after the meeting in classic Outlook")
  g.AddButton("vSave x264 y+18 w92 Default","Save")
@@ -1462,8 +1493,8 @@ HelpTopics() {
         {
             id: "settings",
             title: "Settings",
-            words: "settings folder shortcut hotkey save location options teams outlook calendar microphone mic headset level",
-            what: "Choose the folder, the shortcut, your microphone, the speech model and what happens in Teams calls.",
+            words: "settings folder shortcut hotkey save location options teams outlook calendar microphone mic headset level start startup windows sign in boot automatic",
+            what: "Choose how the app records and transcribes, and whether it starts with Windows.",
             steps: [
                 "Open Settings from the panel or tray menu.",
                 "Type a folder, or click Browse.",
@@ -1479,13 +1510,14 @@ HelpTopics() {
                 ["Settings.Microphone", "Your microphone"],
                 ["Settings.Level", "Moves when it hears you"],
                 ["Settings.Model", "Fast or accurate"],
+                ["Settings.Startup", "Start with Windows"],
                 ["Settings.Detect", "Record Teams calls when they start"],
                 ["?Settings.Calendar", "Name files after Outlook meetings"],
                 ["Settings.Save", "Save changes"],
                 ["Settings.Cancel", "Close without saving"],
             ],
             view: "Settings",
-            more: "Changes apply to the next recording. If your microphone is not connected when you record, or stops during a call, the Windows default records you instead. The Outlook choice is shown only when classic Outlook is installed. Settings are kept in %LOCALAPPDATA%\MeetingRecorder\settings.ini.",
+            more: "Changes apply to the next recording. Start with Windows is on unless you turn it off. It puts a Meeting Recorder shortcut in your Startup folder. If your microphone is not connected when you record, or stops during a call, the Windows default records you instead. The Outlook choice is shown only when classic Outlook is installed. Settings are kept in %LOCALAPPDATA%\MeetingRecorder\settings.ini.",
         },
         {
             id: "transcribe",

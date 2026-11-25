@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.0 - 2026-11-25
+
+- Settings: Start with Windows starts the app when you sign in to Windows. It
+  is on unless you turn it off, and the app keeps its Startup folder shortcut
+  right even if the app's folder moves (#20).
+
 ## 0.12.0 - 2026-11-25
 
 - Tray menu: Open log file shows what the app did and when, to find out what
