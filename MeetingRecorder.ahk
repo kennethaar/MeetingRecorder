@@ -3,9 +3,13 @@
 Persistent
 ; Set before the first window: windows, message boxes and toasts use the tray icon (#8).
 TraySetIcon(A_ScriptDir "\MeetingRecorder.ico")
-AppVersion := "0.11.0"
+AppVersion := "0.12.0"
 AppDir := EnvGet("LOCALAPPDATA") "\MeetingRecorder"
 DirCreate(AppDir)
+; What the app, Backend.ps1 and the capture engine did, to find out what went wrong (#21).
+LogPath := AppDir "\MeetingRecorder.log"
+AppLog("Started v" AppVersion " (AutoHotkey " A_AhkVersion ", Windows " A_OSVersion ") from " A_ScriptFullPath)
+OnError((e, *) => (AppLog("Error: " e.Message (e.Extra = "" ? "" : " (" e.Extra ")") " in " e.What " at line " e.Line), 0))
 Config := AppDir "\settings.ini"
 Folder := IniRead(Config, "Settings", "Folder", A_MyDocuments "\Meeting Recordings")
 Shortcut := IniRead(Config, "Settings", "Shortcut", "^!r")
@@ -61,7 +65,8 @@ BuildTrayMenu(A_TrayMenu)
 ; One click on the tray icon opens the panel (#9).
 A_TrayMenu.ClickCount := 1
 try Hotkey(Shortcut, Toggle)
-catch {
+catch as e {
+ AppLog("Shortcut " Shortcut " is unavailable: " e.Message)
  MsgBox("Shortcut unavailable. Choose another in Settings.", "Meeting Recorder")
 }
 DirCreate(Folder)
@@ -132,6 +137,7 @@ Repair(*) {
  if Child && ProcessExist(Child)
   return
  try FileDelete(StatusPath)
+ AppLog("Audio backend setup started")
  State := "Installing"
  ShowState()
  ShowPanel()
@@ -162,6 +168,7 @@ Toggle(*) {
   name := RecordingName(Folder, title, FormatTime(,"yyyy-MM-dd HHmmss"), id)
   if title != ""
    try SaveMeetingHint(AppDir "\meetings.ini", id, title, MeetingPeople)   ; never blocks a recording
+  AppLog("Start recording" (InCall ? " for a Teams call" : "") ": " name (Microphone = "" ? "" : ", microphone " MicrophoneName))
   State := "Starting"
   ShowState()
   Action.Text := "Stop"
@@ -169,6 +176,7 @@ Toggle(*) {
   Run(PSCommand("Record") " -Output " Q(name) " -Status " Q(StatusPath) " -Stop " Q(StopPath) " -ParentId " DllCall("GetCurrentProcessId") (Microphone = "" ? "" : " -Microphone " Q(Microphone)),, "Hide", &Child)
   StartTick := A_TickCount
  } catch as e {
+  AppLog("Cannot start recording: " e.Message)
   State := "Attention required"
   SetStatus("Cannot start recording", e.Message)
   ShowPanel()
@@ -184,6 +192,7 @@ StopRecording(*) {
  global State, StopPath
  if State != "Recording" && State != "Starting"
   return
+ AppLog("Stop recording")
  FileAppend("stop",StopPath)
  SetCallPhase("")
  State := "Saving"
@@ -206,7 +215,10 @@ Poll() {
    ; the recording is kept and shown as saved.
    discard := Discarding
    Discarding := false
+   if discard
+    AppLog("Discard: " wav)
    if discard && DiscardRecording(wav) {
+    AppLog("Discarded: moved to the Recycle Bin")
     State := "Manual only"
     ShowState()
     Action.Text := "Start"
@@ -243,6 +255,7 @@ Poll() {
  if Child && !ProcessExist(Child) {
   Child := 0
   if State = "Recording" || State = "Starting" || State = "Saving" || State = "Installing" {
+   AppLog("The audio helper closed while " State ", without saying why")
    SetCallPhase(""), Discarding := false
    State := "Attention required"
    SetStatus("Recording stopped", "Look in the recording folder for rescued audio.")
@@ -250,6 +263,9 @@ Poll() {
    ShowPanel()
   }
  }
+ static logged := ""
+ if State != logged
+  AppLog("State: " (logged := State))
  if Closing && !Child
   Leave()
 }
@@ -482,6 +498,7 @@ BuildTrayMenu(m) {
  m.Add("About Meeting Recorder",ShowAbout)
  m.Add()
  m.Add("Repair audio backend",Repair)
+ m.Add("Open log file",OpenLog)
  m.Add("Restart",Restart)
  m.Add("Exit",Quit)
 }
@@ -677,6 +694,30 @@ OpenFolder(*) {
  global Folder
  Run("explorer.exe " Q(Folder))
 }
+; ---------------------------------------------------------------- log file (#21)
+AppLog(text) => WriteLog(LogPath, text)
+OpenLog(*) {
+ global LogPath
+ if !FileExist(LogPath)
+  AppLog("Log opened")
+ Run("notepad.exe " Q(LogPath))
+}
+; One timed line per event; Backend.ps1 and Capture.cs append to the same file in the same form.
+; Past maxBytes the log moves to .1.log, .1 to .2 and so on, and the oldest of keep is dropped.
+; Never throws: a log that cannot be written must not stop a recording.
+WriteLog(path, text, maxBytes := 1048576, keep := 3, source := "app") {
+ line := FormatTime(,"yyyy-MM-dd HH:mm:ss") "." Format("{:03}",A_MSec) " [" source "] " RegExReplace(Trim(text," `t`r`n"),"\s*[\r\n]+\s*"," ") "`r`n"
+ try {
+  if FileExist(path) && FileGetSize(path) >= maxBytes {
+   older := (n) => RegExReplace(path,"\.log$","." n ".log")
+   try FileDelete(older(keep))
+   loop keep - 1
+    try FileMove(older(keep - A_Index), older(keep - A_Index + 1))
+   FileMove(path, older(1))
+  }
+  FileAppend(line, path, "UTF-8-RAW")
+ }
+}
 Settings(*) {
  global Folder, Config, Shortcut, DetectOn, CalendarOn
  static open := 0
@@ -734,8 +775,10 @@ Settings(*) {
    IniWrite(MicrophoneName,Config,"Settings","MicrophoneName")
    SpeechModel := ModelChoice(g)
    IniWrite(SpeechModel,Config,"Settings","Model")
+   AppLog("Settings saved: folder " Folder ", shortcut " Shortcut ", Teams " DetectOn ", Outlook " CalendarOn ", microphone " (Microphone = "" ? "Windows default" : MicrophoneName) ", model " SpeechModel)
    CloseSettings()
   } catch as e {
+   AppLog("Settings not saved: " e.Message)
    MsgBox(e.Message,"Settings not saved")
   }
  }
@@ -908,11 +951,14 @@ PreventRecordingClose(wParam,lParam,msg,hwnd) {
   return 0
 }
 PowerEvent(wParam,*) {
- if wParam = 4
+ if wParam = 4 {
+  AppLog("Windows is going to sleep")
   StopRecording()
+ }
 }
 Quit(*) {
  global Closing, Child
+ AppLog("Exit asked")
  Closing := true
  StopRecording()
  if !Child
@@ -926,6 +972,7 @@ Restart(*) {
 Leave() => Restarting ? Reload() : ExitApp()
 ExitHandler(reason,code) {
  global State, StopPath, Child
+ AppLog("Closing (" reason ") while " State)
  if State = "Recording" || State = "Starting" || State = "Saving" {
   try FileAppend("stop",StopPath)
   if Child
@@ -984,6 +1031,7 @@ StartTranscribe(wav) {
  global TxStep, TxResumed, TxDownload
  TxWav := wav, TxStart := A_TickCount, TxPercent := 0, TxStep := 1, TxResumed := false, TxDownload := ""
  try {
+  AppLog((py = "" ? "Transcriber setup started for " : "Transcribe with " SpeechModel ": ") wav)
   if py = "" {
    TxState := "Installing", TxDetail := "Getting the transcriber ready", TxStep := 0
    Run(PSCommand("Transcriber") " -Status " Q(TxSetupPath),, "Hide", &TxPid)
@@ -1019,6 +1067,7 @@ TranscribePoll() {
   if s = "Done" {
    try {
     WriteTranscript(TxWav, TxSegmentsPath)
+    AppLog("Transcript ready: " TranscriptPath(TxWav,"txt"))
     TxState := "", TxPid := 0
     SetTimer(TranscribePoll, 0)
     AnnounceTranscript()
@@ -1031,6 +1080,7 @@ TranscribePoll() {
 }
 TranscribeFailed(detail) {
  global TxState, TxDetail, TxPid
+ AppLog("Transcribe failed: " detail " (details: " TxStatusPath ".log)")
  SetTimer(TranscribePoll, 0)
  TxState := "Error", TxDetail := detail, TxPid := 0
  AnnounceTranscript()
@@ -1177,6 +1227,7 @@ DetectCall() {
   if CalendarOn
    MeetingTitle := PickMeeting(OutlookMeetings(), A_Now, &MeetingPeople)
  }
+ AppLog(active ? "Teams call started" (MeetingTitle = "" ? "" : ": " MeetingTitle) : "Teams call ended")
  switch CallAction(active, State) {
   case "Start":
    PanelWasVisible := DllCall("IsWindowVisible","Ptr",Panel.Hwnd)
@@ -1226,6 +1277,7 @@ NotNowClick(*) {
   SetCallPhase("")   ; Keep recording after the call ended
   return
  }
+ AppLog("Discard clicked")
  Discarding := true
  StopRecording()
  SetStatus("Discarding...", "")
@@ -1464,7 +1516,7 @@ HelpTopics() {
         {
             id: "tray",
             title: "Tray menu",
-            words: "tray icon menu notification area clock red dot open panel show window latest older earlier recent recordings help about version progress restart reload start again exit quit",
+            words: "tray icon menu notification area clock red dot open panel show window latest older earlier recent recordings help about version progress restart reload start again exit quit log file error problem wrong troubleshoot",
             what: "The red dot in the notification area, by the clock, is the app. Click it to open the panel. Right-click it for everything else.",
             steps: [
                 "Click the red dot to open the panel, or right-click it for the menu.",
@@ -1473,7 +1525,7 @@ HelpTopics() {
             ],
             keys: [],
             legend: [],
-            more: "Recordings lists the 8 newest recordings, newest first. Transcript at the right means it has one. For an older one, choose Other recording. While a recording is transcribed, the top line of the menu shows how far it has come. Click it to see the transcript window. Restart closes the app and starts it again. A recording that is running is saved first. If the red dot is hidden, click the arrow by the clock.",
+            more: "Recordings lists the 8 newest recordings, newest first. Transcript at the right means it has one. For an older one, choose Other recording. While a recording is transcribed, the top line of the menu shows how far it has come. Click it to see the transcript window. Restart closes the app and starts it again. A recording that is running is saved first. Open log file shows what the app did and when, to find out what went wrong. Older lines move to MeetingRecorder.1.log, .2 and .3 next to it. If the red dot is hidden, click the arrow by the clock.",
         },
         {
             id: "recovery",

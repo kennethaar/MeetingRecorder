@@ -10,8 +10,19 @@ using NAudio.CoreAudioApi;
 public static class CaptureEngine {
  static volatile bool stopping;
  static volatile string failure = "";
- static string stateFile;
+ static string stateFile, logFile;
+ // The app's log (#21), beside status.ini, in the same form as the app's lines. The app rotates it.
+ static void Log(string text) {
+  try{
+   using(var f=new FileStream(logFile,FileMode.Append,FileAccess.Write,FileShare.ReadWrite|FileShare.Delete)){
+    byte[] b=new System.Text.UTF8Encoding(false).GetBytes(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff",System.Globalization.CultureInfo.InvariantCulture)+" [capture] "+text.Replace("\r"," ").Replace("\n"," ")+"\r\n");
+    f.Write(b,0,b.Length);
+   }
+  }catch{}
+ }
+ static string Name(MMDevice d){try{return d.FriendlyName;}catch{return "(unknown device)";}}
  static void Status(string state, string detail) {
+  Log(state+": "+detail);
   string text="[Capture]\r\nState="+state+"\r\nDetail="+detail.Replace("\r"," ").Replace("\n"," ")+"\r\n";
   string tmp=stateFile+".tmp"; File.WriteAllText(tmp,text,System.Text.Encoding.Unicode);
   if(File.Exists(stateFile)) File.Replace(tmp,stateFile,null); else File.Move(tmp,stateFile);
@@ -26,7 +37,7 @@ public static class CaptureEngine {
  // One active speaker or headset (#13). Others is the mix of all of them, because Teams may play
  // the call on any of them, not only on the Windows default communication device.
  sealed class Output {
-  public MMDevice Device; public WasapiLoopbackCapture Capture; public ISampleProvider Samples; public volatile bool Gone;
+  public MMDevice Device; public WasapiLoopbackCapture Capture; public ISampleProvider Samples; public volatile bool Gone; public bool Logged;
  }
  static List<Output> OpenOutputs(MMDeviceEnumerator devices){
   var outs=new List<Output>();
@@ -40,7 +51,7 @@ public static class CaptureEngine {
     o.Capture.RecordingStopped+=(s,e)=>{if(!stopping)o.Gone=true;};
     o.Samples=Provider(buffer);
     outs.Add(o);
-   }catch{try{if(o.Capture!=null)o.Capture.Dispose();}catch{} d.Dispose();}
+   }catch(Exception ex){Log("Cannot record from "+Name(d)+": "+ex.Message);try{if(o.Capture!=null)o.Capture.Dispose();}catch{} d.Dispose();}
   }
   return outs;
  }
@@ -92,12 +103,14 @@ public static class CaptureEngine {
  public static void Run(string output,string status,string stop,int parent){Run(output,status,stop,parent,"");}
  public static void Run(string output,string status,string stop,int parent,string micId){
   stateFile=status; stopping=false; failure="";
+  logFile=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(status)),"MeetingRecorder.log");
   Mic mic=null;List<Output> outs=new List<Output>();MMDeviceEnumerator devices=null;
   FileStream file=null; long bytes=0; bool started=false; Stopwatch clock=new Stopwatch();
   try{
    devices=new MMDeviceEnumerator();
    var md=PickMic(devices,micId,null);
    if(md==null)throw new Exception("No microphone is on. Turn one on and try again.");
+   if(!string.IsNullOrEmpty(micId) && md.ID!=micId)Log("The chosen microphone is not connected, so "+Name(md)+" records you");
    mic=OpenMic(md);
    outs=OpenOutputs(devices);
    if(outs.Count==0)throw new Exception("No speaker or headset is on. Turn one on and try again.");
@@ -123,14 +136,17 @@ public static class CaptureEngine {
     if(failure!="")throw new Exception(failure);
     try{if(Process.GetProcessById(parent).HasExited)throw new Exception();}catch{failure="Controller exited; audio preserved.";break;}
     // The microphone dropped out: Me stays silent until the Windows default takes over (#14).
-    if(mic!=null && (mic.Gone || !Active(mic.Device))){goneId=mic.Device.ID;CloseMic(mic);mic=null;noMic=Stopwatch.StartNew();lastTry=null;}
+    if(mic!=null && (mic.Gone || !Active(mic.Device))){Log("Microphone "+Name(mic.Device)+" dropped out");goneId=mic.Device.ID;CloseMic(mic);mic=null;noMic=Stopwatch.StartNew();lastTry=null;}
     if(mic==null && (lastTry==null || lastTry.ElapsedMilliseconds>=500)){
      lastTry=Stopwatch.StartNew();
      var d=PickMic(devices,null,goneId);
-     if(d!=null){try{mic=OpenMic(d);mic.Capture.StartRecording();Status("Recording",d.FriendlyName+" / "+speakers);}catch{CloseMic(mic);mic=null;}}
+     if(d!=null){try{mic=OpenMic(d);mic.Capture.StartRecording();Status("Recording",d.FriendlyName+" / "+speakers);}catch(Exception ex){Log("Cannot record from "+Name(d)+": "+ex.Message);CloseMic(mic);mic=null;}}
      else if(noMic.Elapsed.TotalSeconds>=30)throw new Exception("The microphone disconnected.");
     }
-    foreach(var o in outs)if(!Active(o.Device))o.Gone=true;
+    foreach(var o in outs){
+     if(!Active(o.Device))o.Gone=true;
+     if(o.Gone && !o.Logged){o.Logged=true;Log("Speaker or headset "+Name(o.Device)+" stopped; recording goes on from the others");}
+    }
     if(outs.TrueForAll(o=>o.Gone))throw new Exception("An audio device disconnected.");
     if(clock.Elapsed.TotalHours>=5){failure="Five-hour draft limit reached. Start a new recording.";break;}
     // Clock-paced output keeps silence in the file. Device-clock drift remains a validation gate.
@@ -146,6 +162,7 @@ public static class CaptureEngine {
     if(clock.ElapsedMilliseconds-checkpoint>=1000){Header(file,bytes);checkpoint=clock.ElapsedMilliseconds;}
    }
    clock.Stop();
+   Log((failure==""?"Stop asked":"Stopping: "+failure)+" after "+clock.Elapsed.ToString(@"hh\:mm\:ss"));
    stopping=true;if(mic!=null){try{mic.Capture.StopRecording();}catch{}}foreach(var o in outs){try{o.Capture.StopRecording();}catch{}}
    var drain=Stopwatch.StartNew();while(((mic!=null && mic.Capture.CaptureState!=CaptureState.Stopped) || outs.Exists(o=>o.Capture.CaptureState!=CaptureState.Stopped))&&drain.ElapsedMilliseconds<3000)Thread.Sleep(10);
    // Drain queued audio up to elapsed capture duration, preserving the latency tail.

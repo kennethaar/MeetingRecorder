@@ -3,13 +3,20 @@ $ErrorActionPreference='Stop'
 $runtime=Join-Path $env:LOCALAPPDATA 'MeetingRecorder'
 $deps=Join-Path $runtime 'backend-2.2.1'
 New-Item -ItemType Directory -Force $deps | Out-Null
+# The app's log (#21), beside status.ini: one timed line per event. The app rotates it.
+$logFile=if($Status){Join-Path (Split-Path ([IO.Path]::GetFullPath($Status))) 'MeetingRecorder.log'}else{Join-Path $runtime 'MeetingRecorder.log'}
+function Write-Log($text) {
+ try{$s=[IO.File]::Open($logFile,'Append','Write','ReadWrite,Delete');try{$b=[Text.Encoding]::UTF8.GetBytes((Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff',[Globalization.CultureInfo]::InvariantCulture)+" [backend] $("$text".Trim() -replace '\s*[\r\n]+\s*',' ')`r`n");$s.Write($b,0,$b.Length)}finally{$s.Dispose()}}catch{}
+}
+Write-Log "$Mode$(if($Output){" $Output"})$(if($Microphone){" microphone $Microphone"}) (PowerShell $($PSVersionTable.PSVersion), .NET $([Environment]::Version))"
 function Set-State($state,$detail) {
+ Write-Log "${state}: $detail"
  if($Status){$tmp=$Status+'.tmp';[IO.File]::WriteAllText($tmp,"[Capture]`r`nState=$state`r`nDetail=$($detail -replace '[\r\n]',' ')`r`n",[Text.Encoding]::Unicode);if(Test-Path $Status){[IO.File]::Replace($tmp,$Status,[NullString]::Value)}else{[IO.File]::Move($tmp,$Status)}}
 }
 try {
  if($Mode -eq 'Recover') {
   Get-ChildItem -LiteralPath $Output -Filter '*.partial.wav' | ForEach-Object {
-   $f=$null
+   $f=$null;$file=$_
    try {
     $f=[IO.File]::Open($_.FullName,'Open','ReadWrite','None')
     if($f.Length -lt 44){throw 'No recoverable WAV payload'}
@@ -19,7 +26,11 @@ try {
     $f.Position=4;$w.Write([uint32]($n+36));$f.Position=40;$w.Write([uint32]$n);$f.Flush($true);$f.Dispose();$f=$null
     $target=$_.FullName.Replace('.partial.wav',' - Recovered incomplete.wav')
     [IO.File]::Move($_.FullName,$target)
-   } catch { Write-Warning 'Recovery could not finish; original retained.' } finally {if($f){$f.Dispose()}}
+    Write-Log "Recovered $($file.Name) as $(Split-Path $target -Leaf)"
+   } catch {
+    Write-Log "Could not recover $($file.Name), so it is kept as it is: $($_.Exception.Message)"
+    Write-Warning 'Recovery could not finish; original retained.'
+   } finally {if($f){$f.Dispose()}}
   }
   exit 0
  }
@@ -90,4 +101,4 @@ try {
  Add-Type -Path (Join-Path $PSScriptRoot 'Capture.cs') -ReferencedAssemblies @($core,$wasapi,$facade,'System.dll','System.Core.dll')
  if($Mode -eq 'Setup'){Set-State 'Ready' 'Backend ready';exit 0}
  [CaptureEngine]::Run($Output,$Status,$Stop,$ParentId,$Microphone)
-} catch {Set-State 'Error' $_.Exception.Message;exit 1}
+} catch {Write-Log "Stopped at Backend.ps1 line $($_.InvocationInfo.ScriptLineNumber)";Set-State 'Error' $_.Exception.Message;exit 1}

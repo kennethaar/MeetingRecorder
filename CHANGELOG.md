@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.0 - 2026-11-25
+
+- Tray menu: Open log file shows what the app did and when, to find out what
+  went wrong. Recordings, Teams calls, microphones, transcripts and errors are
+  all in it. Older lines move to MeetingRecorder.1.log to .3.log (#21).
+
 ## 0.11.0 - 2026-11-17
 
 - Tray menu: Restart closes the app and starts it again. A recording that is

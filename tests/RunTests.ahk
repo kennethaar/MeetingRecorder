@@ -45,6 +45,7 @@ Tests := [
     ["App icon is used on the tray, windows and toasts (#8)", TestAppIcon],
     ["Every window is laid out cleanly: no clipped text, gaps or stray buttons (#9)", TestWindowLayout],
     ["Panel and Recording saved window speak plainly (#9)", TestPlainWords],
+    ["The log file has one timed line per event and rotates, keeping 3 older files (#21)", TestLogRotation],
 ]
 Failures := 0, Ran := 0
 for t in Tests {
@@ -181,6 +182,11 @@ TestRecovery() {
         size := f.Length, f.Pos := 4, riff := f.ReadUInt(), f.Pos := 40, data := f.ReadUInt()
         f.Close()
         Check(size = 52 && riff = 44 && data = 8, Format("Header wrong: size {} riff {} data {}", size, riff, data))
+        ; #21: the log says what recovery did with each file.
+        logFile := tmp "\appdata\MeetingRecorder\MeetingRecorder.log"
+        log := FileExist(logFile) ? FileRead(logFile, "UTF-8") : "(no log)"
+        Check(RegExMatch(log, "m)^\S+ \S+ \[backend\] Recovered a\.partial\.wav as a - Recovered incomplete\.wav$"), "Log does not say a was recovered:`n" log)
+        Check(RegExMatch(log, "m)^\S+ \S+ \[backend\] Could not recover b\.partial\.wav, so it is kept as it is: "), "Log does not say b was kept:`n" log)
     } finally {
         EnvSet("LOCALAPPDATA", oldAppData)
         try DirDelete(tmp, true)
@@ -347,6 +353,12 @@ TestMicRecording() {
             state := WaitState(status, "Saved", 15000)
             Check(state = "Saved", "Microphone '" c[2] "': recording was not saved: " state " " IniRead(status, "Capture", "Detail", ""))
         }
+        ; #21: the log beside status.ini tells the recording's story, from the backend and the engine.
+        logFile := tmp "\MeetingRecorder.log"
+        log := FileExist(logFile) ? FileRead(logFile, "UTF-8") : "(no log)"
+        Check(RegExMatch(log, "m)^\S+ \S+ \[backend\] Record .*rec1\.partial\.wav"), "Log has no backend Record line:`n" log)
+        Check(InStr(log, "[capture] Recording: " cases[1][2] " / "), "Log does not name the microphone recorded:`n" log)
+        Check(RegExMatch(log, "m)^\S+ \S+ \[capture\] Saved: .*rec1\.wav$"), "Log does not say the recording was saved:`n" log)
     } finally {
         EnvSet("LOCALAPPDATA", oldAppData)
         if pid && ProcessExist(pid)
@@ -797,7 +809,7 @@ TestTrayMenu() {
     m := Menu()
     BuildTrayMenu(m)
     items := ["Open Meeting Recorder", "", "Start / stop recording", "Recordings", "Open recordings folder", ""
-        , "Settings", "Help", "About Meeting Recorder", "", "Repair audio backend", "Restart", "Exit"]
+        , "Settings", "Help", "About Meeting Recorder", "", "Repair audio backend", "Open log file", "Restart", "Exit"]
     Check(Join(MenuLabels(m.Handle)) = Join(items), "Tray menu was: " Join(MenuLabels(m.Handle)))
     Check(DllCall("GetMenuDefaultItem", "Ptr", m.Handle, "UInt", 1, "UInt", 0, "Int") = 0, "Open Meeting Recorder is not the default (click) item")
     Check(RegExMatch(FileRead(Root "\MeetingRecorder.ahk", "UTF-8"), "m)^A_TrayMenu\.ClickCount := 1\s*$"), "A single click on the tray icon must open the panel")
@@ -819,6 +831,36 @@ TestTrayMenu() {
     Check(Join(MenuLabels(m.Handle)) = Join(items), "After done: " Join(MenuLabels(m.Handle)))
     SetTrayStatus(m, "")
     Check(Join(MenuLabels(m.Handle)) = Join(items), "Removing twice changed the menu: " Join(MenuLabels(m.Handle)))
+}
+
+; #21: nothing showed what the app did when something went wrong. MeetingRecorder.log gets one
+; timed line per event; past its size it moves to .1.log (then .2, .3) and the oldest is dropped.
+TestLogRotation() {
+    dir := A_Temp "\MeetingRecorder-tests\log-" A_TickCount
+    DirCreate(dir)
+    path := dir "\MeetingRecorder.log"
+    try {
+        WriteLog(path, "Started`r`nwith two lines")
+        text := FileRead(path, "UTF-8")
+        Check(RegExMatch(text, "^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} \[app\] Started with two lines`r`n$"), "Log line was: " text)
+        FileDelete(path)
+        loop 40
+            WriteLog(path, Format("line {:02} xxxxxxxxxxxxxxxxxxxx", A_Index), 200)
+        Check(!FileExist(dir "\MeetingRecorder.4.log"), "More than 3 older log files are kept")
+        numbers := []
+        for f in [dir "\MeetingRecorder.3.log", dir "\MeetingRecorder.2.log", dir "\MeetingRecorder.1.log", path] {
+            Check(FileExist(f), "Missing " f)
+            Check(FileGetSize(f) < 200 + 60, f " grew past its limit: " FileGetSize(f) " bytes")
+            pos := 1
+            while pos := RegExMatch(FileRead(f, "UTF-8"), "line (\d\d)", &m, pos)
+                numbers.Push(Integer(m[1])), pos += m.Len
+        }
+        Check(numbers.Length && numbers[-1] = 40 && numbers[1] > 1, "Newest line must be last and the oldest dropped: " Join(numbers))
+        for n in numbers
+            Check(A_Index = 1 || n = numbers[A_Index - 1] + 1, "Lines are missing or out of order: " Join(numbers))
+    } finally {
+        try DirDelete(dir, true)
+    }
 }
 
 ; #11: only the latest recording could be opened. Tray menu › Recordings lists the 8 newest
@@ -1159,6 +1201,7 @@ Settings(*) => 0
 ShowHelp(*) => 0
 ShowAbout(*) => 0
 Repair(*) => 0
+OpenLog(*) => 0
 Quit(*) => 0
 Restart(*) => 0
 ShowTranscribing(*) => 0
